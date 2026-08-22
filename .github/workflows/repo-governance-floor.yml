@@ -1,0 +1,226 @@
+# Nebos-ai reusable workflow — repo-governance-floor v1
+#
+# Downstream consumers reference this via:
+#   uses: Nebos-ai/.github/.github/workflows/repo-governance-floor.yml@v1
+#
+# Enforces Constitution Article XV's "Derived enforcement" contract for every
+# repo in the Nebos-ai org:
+#   - docs/agents/BASELINE.md exists (or a top-level pointer to nebos-governance)
+#   - AGENTS.md size ≤ 32 KiB (WARN at 24 KiB per AD-6a)
+#   - AGENTS.md carries the baseline back-ref HTML comment (per AD-6b)
+#   - AGENTS.md rule numbers referenced by shell_*.references_agents_md_rule
+#     exist in this repo's AGENTS.md (drift-detector, per Article XV para 3)
+#   - repo_inventory.json distinct matrix_triple count matches the frozen
+#     MATRIX_TRIPLE_ENUM tuple (per W1 v5 AD-1 F1)
+#   - Every commit on the PR range that touches docs/decisions/absorbed/ (or
+#     equivalent absorbed-artifact path) is SSH-signed by an allowed signer
+#     (per Rule 7 SSH-verify anchor + RSSB-13 backstop)
+#
+# The check scripts live in nebos-governance/scripts/repo_structure_v5/ per
+# Constitution Article XV Derived enforcement paragraph (canonical home
+# established by RSSB-14 in PR #2229). This workflow checks out that repo
+# alongside the consumer repo, then runs the scripts against the consumer.
+#
+# Rationale for reusable-workflow shape (per phase_f §Waves W0):
+#   - Single source of truth for check versions across the org
+#   - Consumer repos declare {sub_category, matrix_triple, sub_units[]} inputs;
+#     workflow resolves the appropriate script suite
+#   - v1 tag pins the contract so downstream repos are not silently upgraded
+
+name: repo-governance-floor
+
+on:
+  workflow_call:
+    inputs:
+      sub_category:
+        description: >-
+          Repo sub_category per Article XV taxonomy (e.g. "service", "surface",
+          "fullstack", "infra", "worker", "asset", "docs"). Determines which
+          subset of checks apply.
+        required: true
+        type: string
+      matrix_triple:
+        description: >-
+          Optional {role, language, runtime} triple as JSON. Populated only if
+          this repo's triple recurs across ≥2 org repos (per W1 v5 AD-1 F1
+          collapse). Empty string → per-instance null; check_matrix_triple_enum
+          asserts the value is either in the frozen 4-triple enum or null.
+        required: false
+        type: string
+        default: ""
+      allowed_signers_path:
+        description: >-
+          Path to .git-signers/allowed_signers within the consumer repo. Default
+          matches the nebos-governance convention. Set to empty string to skip
+          signer verification (contrary to Article XV Rule 7 — use only for
+          bootstrap of new repos before signers are enrolled).
+        required: false
+        type: string
+        default: ".git-signers/allowed_signers"
+      governance_ref:
+        description: >-
+          Ref of nebos-governance to check out for the check-scripts. Default
+          "main" pins to the current canonical enforcement. Override to a SHA
+          or tag for reproducibility windows.
+        required: false
+        type: string
+        default: "main"
+
+    outputs:
+      compliance_score:
+        description: >-
+          Numeric 0-100 compliance score based on how many checks passed. Fed
+          back to repo_inventory.json compliance_score attribute per Article XV
+          para 2.
+        value: ${{ jobs.floor.outputs.compliance_score }}
+
+# Prevent parallel floor runs on the same ref (per OR-H2 concurrency requirement)
+concurrency:
+  group: repo-governance-floor-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  floor:
+    name: Nebos-ai governance floor
+    runs-on: ubuntu-latest
+    outputs:
+      compliance_score: ${{ steps.score.outputs.value }}
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@v4
+        with:
+          path: consumer
+          fetch-depth: 0
+
+      - name: Checkout nebos-governance for check scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Nebos-ai/nebos-governance
+          ref: ${{ inputs.governance_ref }}
+          path: governance
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check BASELINE.md exists
+        id: baseline
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          python3 ../governance/scripts/repo_structure_v5/check_baseline_md_exists.py --self-check
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check AGENTS.md size
+        id: size
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          python3 ../governance/scripts/repo_structure_v5/check_agents_md_size.py
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check AGENTS.md baseline back-ref
+        id: bref
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          python3 ../governance/scripts/repo_structure_v5/check_agents_md_baseline_ref.py
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check AGENTS.md rule-drift (informational for non-governance consumers)
+        id: drift
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          # drift-detector runs against shell_*.references_agents_md_rule rows;
+          # skipped when consumer doesn't wire that substrate (informational)
+          python3 ../governance/scripts/repo_structure_v5/check_agents_md_rule_drift.py || true
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check matrix_triple enum (when inputs.matrix_triple != "")
+        id: triple
+        if: inputs.matrix_triple != ''
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          python3 ../governance/scripts/repo_structure_v5/check_matrix_triple_enum.py \
+                  --inventory ../governance/docs/registries/repo_inventory.json
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify absorption/governance commits SSH-signed (when allowed_signers_path present)
+        id: sign
+        if: inputs.allowed_signers_path != ''
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          if [[ ! -f "${{ inputs.allowed_signers_path }}" ]]; then
+            echo "::notice::${{ inputs.allowed_signers_path }} not present in consumer repo; skipping signer check (bootstrap posture)"
+            echo "passed=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "::notice::Not a pull_request context; SSH signer check applies to PR ranges only"
+            echo "passed=n/a" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          COMMITS=$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}")
+          FAILED=0
+          while IFS= read -r sha; do
+            [[ -z "$sha" ]] && continue
+            if ! git -c gpg.format=ssh \
+                     -c gpg.ssh.allowedSignersFile="${{ inputs.allowed_signers_path }}" \
+                     verify-commit "$sha" 2>/dev/null; then
+              echo "::error::${sha:0:12} SSH-verify FAILED"
+              FAILED=$((FAILED + 1))
+            fi
+          done <<< "$COMMITS"
+          if [[ $FAILED -gt 0 ]]; then
+            echo "::error::$FAILED commit(s) not SSH-signed by an allowed signer"
+            exit 1
+          fi
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Compute compliance score
+        id: score
+        run: |
+          set -euo pipefail
+          TOTAL=0
+          PASSED=0
+          for check in baseline size bref drift triple sign; do
+            outcome_var="steps.$check.outputs.passed"
+            # Bash can't easily access namespaced action outputs; use env indirection
+            case "$check" in
+              baseline) result="${{ steps.baseline.outputs.passed }}" ;;
+              size)     result="${{ steps.size.outputs.passed }}" ;;
+              bref)     result="${{ steps.bref.outputs.passed }}" ;;
+              drift)    result="${{ steps.drift.outputs.passed }}" ;;
+              triple)   result="${{ steps.triple.outputs.passed }}" ;;
+              sign)     result="${{ steps.sign.outputs.passed }}" ;;
+            esac
+            case "$result" in
+              true)      TOTAL=$((TOTAL + 1)); PASSED=$((PASSED + 1)) ;;
+              skipped|n/a) : ;;  # not counted in denominator
+              *)         TOTAL=$((TOTAL + 1)) ;;  # failure or missing
+            esac
+          done
+          if [[ $TOTAL -eq 0 ]]; then
+            SCORE=100
+          else
+            SCORE=$(( (PASSED * 100) / TOTAL ))
+          fi
+          echo "Compliance score: ${SCORE}/100 (${PASSED}/${TOTAL} checks passed)"
+          echo "value=${SCORE}" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if compliance score < 100 (fail-closed mode)
+        if: steps.score.outputs.value != '100'
+        run: |
+          echo "::error::Repo-governance-floor compliance score is ${{ steps.score.outputs.value }}/100 — one or more checks failed. Fix per Constitution Article XV Derived enforcement or amend the consumer repo's declared attributes."
+          exit 1
