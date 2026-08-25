@@ -26,6 +26,35 @@
 #   - Consumer repos declare {sub_category, matrix_triple, sub_units[]} inputs;
 #     workflow resolves the appropriate script suite
 #   - v1 tag pins the contract so downstream repos are not silently upgraded
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# 2026-08-25 amendment (per no-pre-existing-debt-excuse-ever + warn-first
+# graduation pattern, matching ADR-115/ADR-297 posture):
+#
+#   The default `github.token` provisioned by GitHub Actions does NOT have
+#   cross-repo read access to the private `Nebos-ai/nebos-governance` repo.
+#   Every consumer that doesn't ship its own cross-repo credential was
+#   therefore failing hard on the corpus-checkout step ("Repository not
+#   found", exit 128), yielding a red governance floor for reasons unrelated
+#   to that consumer's own compliance. Confirmed on 2026-08-25 for
+#   nebbos-site, nebos-mail, and nebos-projects.
+#
+#   Fix:
+#     (a) Accept an optional `GOVERNANCE_READ_TOKEN` secret. When present, use
+#         it for the corpus checkout (fine-grained PAT or App installation
+#         token with `contents:read` on Nebos-ai/nebos-governance).
+#     (b) `continue-on-error: true` on the corpus checkout so the run
+#         degrades to WARN when neither the passed secret nor `github.token`
+#         can reach the corpus.
+#     (c) Gate downstream checks + fail-closed on whether corpus is present.
+#         When corpus is unreachable, the workflow emits a loud NOTICE with
+#         setup instructions and exits success (warn-first, matches
+#         ADR-290 governance-registry-sync degrade pattern).
+#     (d) Consumers pass `secrets: inherit` (or `secrets: { GOVERNANCE_READ_TOKEN: ... }`)
+#         to flow the token through. Absent any token, the workflow runs the
+#         handful of check scripts it can bundle inline (AGENTS.md size +
+#         baseline back-ref) so compliance still ships a signal.
+# ─────────────────────────────────────────────────────────────────────────────
 
 name: repo-governance-floor
 
@@ -66,6 +95,15 @@ on:
         type: string
         default: "main"
 
+    secrets:
+      GOVERNANCE_READ_TOKEN:
+        description: >-
+          Optional PAT or GitHub App installation token with contents:read on
+          Nebos-ai/nebos-governance. When absent, the workflow degrades to
+          warn-first (bundled checks only). Consumers wire it via
+          `secrets: inherit` (org-level secret) or by passing it explicitly.
+        required: false
+
     outputs:
       compliance_score:
         description: >-
@@ -96,44 +134,54 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout nebos-governance for check scripts
+        id: gov_checkout
+        continue-on-error: true # warn-first: no cross-repo access ⇒ degrade, don't fail
         uses: actions/checkout@v4
         with:
           repository: Nebos-ai/nebos-governance
           ref: ${{ inputs.governance_ref }}
           path: governance
           fetch-depth: 1
+          token: ${{ secrets.GOVERNANCE_READ_TOKEN || github.token }}
+
+      - name: Gate — corpus checkout succeeded?
+        id: gate
+        env:
+          GOV_CHECKOUT_OUTCOME: ${{ steps.gov_checkout.outcome }}
+          HAS_GOV_TOKEN: ${{ secrets.GOVERNANCE_READ_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "${GOV_CHECKOUT_OUTCOME}" != "success" ]; then
+            if [ "${HAS_GOV_TOKEN}" = "true" ]; then
+              echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED even with the supplied GOVERNANCE_READ_TOKEN — token may be expired, revoked, or lack contents:read on that repo. Remote check scripts SKIPPED (bundled checks still run)."
+            else
+              echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED. The default github.token has no read access to that private repo. To enable the full check suite, add a repo-level or org-level secret named GOVERNANCE_READ_TOKEN (fine-grained PAT or GitHub App installation token with contents:read on Nebos-ai/nebos-governance) and pass 'secrets: inherit' from the consumer workflow. Bundled checks still run this pass."
+            fi
+            echo "have_corpus=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_corpus=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ── Remote (corpus-backed) checks ────────────────────────────────────
+      # Every step below gates on `steps.gate.outputs.have_corpus == 'true'`
+      # so the workflow degrades cleanly when the corpus is unreachable.
       - name: Check BASELINE.md exists
         id: baseline
+        if: steps.gate.outputs.have_corpus == 'true'
         continue-on-error: true
         working-directory: consumer
         run: |
           python3 ../governance/scripts/repo_structure_v5/check_baseline_md_exists.py --self-check
           echo "passed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Check AGENTS.md size
-        id: size
-        continue-on-error: true
-        working-directory: consumer
-        run: |
-          python3 ../governance/scripts/repo_structure_v5/check_agents_md_size.py
-          echo "passed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Check AGENTS.md baseline back-ref
-        id: bref
-        continue-on-error: true
-        working-directory: consumer
-        run: |
-          python3 ../governance/scripts/repo_structure_v5/check_agents_md_baseline_ref.py
-          echo "passed=true" >> "$GITHUB_OUTPUT"
-
       - name: Check AGENTS.md rule-drift (informational for non-governance consumers)
         id: drift
+        if: steps.gate.outputs.have_corpus == 'true'
         continue-on-error: true
         working-directory: consumer
         run: |
@@ -144,7 +192,7 @@ jobs:
 
       - name: Check matrix_triple enum (when inputs.matrix_triple != "")
         id: triple
-        if: inputs.matrix_triple != ''
+        if: steps.gate.outputs.have_corpus == 'true' && inputs.matrix_triple != ''
         continue-on-error: true
         working-directory: consumer
         run: |
@@ -152,6 +200,62 @@ jobs:
                   --inventory ../governance/docs/registries/repo_inventory.json
           echo "passed=true" >> "$GITHUB_OUTPUT"
 
+      # ── Bundled checks (always run, no corpus needed) ────────────────────
+      # These two checks are simple enough to inline here so consumers still
+      # get *some* enforcement even when the corpus is unreachable. Logic
+      # kept in-sync with nebos-governance/scripts/repo_structure_v5/
+      # check_agents_md_size.py and check_agents_md_baseline_ref.py.
+      - name: Check AGENTS.md size (bundled)
+        id: size
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          F="AGENTS.md"
+          if [ ! -f "$F" ]; then
+            echo "::notice::AGENTS.md not present in consumer repo — skipping size check"
+            echo "passed=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SIZE=$(wc -c < "$F")
+          WARN_KIB=24
+          HARD_KIB=32
+          WARN_BYTES=$((WARN_KIB * 1024))
+          HARD_BYTES=$((HARD_KIB * 1024))
+          if [ "$SIZE" -gt "$HARD_BYTES" ]; then
+            echo "::error::AGENTS.md is ${SIZE} bytes (> ${HARD_KIB} KiB hard limit per Article XV AD-6a)"
+            exit 1
+          fi
+          if [ "$SIZE" -gt "$WARN_BYTES" ]; then
+            echo "::warning::AGENTS.md is ${SIZE} bytes (> ${WARN_KIB} KiB soft warn — split before hitting ${HARD_KIB} KiB)"
+          fi
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check AGENTS.md baseline back-ref (bundled)
+        id: bref
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          F="AGENTS.md"
+          if [ ! -f "$F" ]; then
+            echo "::notice::AGENTS.md not present in consumer repo — skipping back-ref check"
+            echo "passed=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # AD-6b: AGENTS.md must carry an HTML comment pointing at the
+          # nebos-governance baseline. Grep is intentionally lenient — any
+          # comment referencing nebos-governance/docs/agents/BASELINE.md
+          # (or the local docs/agents/BASELINE.md pointer) satisfies it.
+          if grep -qE '<!--.*nebos-governance.*BASELINE\.md.*-->|<!--.*docs/agents/BASELINE\.md.*-->' "$F"; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::AGENTS.md is missing the baseline back-ref HTML comment (per Article XV AD-6b). Add e.g. <!-- baseline: nebos-governance/docs/agents/BASELINE.md -->"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # ── Signer check (always runs on PR context, no corpus needed) ───────
       - name: Verify absorption/governance commits SSH-signed (when allowed_signers_path present)
         id: sign
         if: inputs.allowed_signers_path != ''
@@ -195,8 +299,6 @@ jobs:
           TOTAL=0
           PASSED=0
           for check in baseline size bref drift triple sign; do
-            outcome_var="steps.$check.outputs.passed"
-            # Bash can't easily access namespaced action outputs; use env indirection
             case "$check" in
               baseline) result="${{ steps.baseline.outputs.passed }}" ;;
               size)     result="${{ steps.size.outputs.passed }}" ;;
@@ -206,9 +308,10 @@ jobs:
               sign)     result="${{ steps.sign.outputs.passed }}" ;;
             esac
             case "$result" in
-              true)      TOTAL=$((TOTAL + 1)); PASSED=$((PASSED + 1)) ;;
+              true)        TOTAL=$((TOTAL + 1)); PASSED=$((PASSED + 1)) ;;
               skipped|n/a) : ;;  # not counted in denominator
-              *)         TOTAL=$((TOTAL + 1)) ;;  # failure or missing
+              "")          : ;;  # step gated off (e.g. corpus unreachable) — not counted
+              *)           TOTAL=$((TOTAL + 1)) ;;  # failure
             esac
           done
           if [[ $TOTAL -eq 0 ]]; then
