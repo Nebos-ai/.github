@@ -55,6 +55,18 @@
 #         handful of check scripts it can bundle inline (AGENTS.md size +
 #         baseline back-ref) so compliance still ships a signal.
 # ─────────────────────────────────────────────────────────────────────────────
+# 2026-10-03 amendment (founder-directed, session ed136d0a):
+#
+#   (e) The score now reads each check's `outcome`. A check that exits non-zero
+#       without writing `passed=` (size, baseline, triple, sign did) used to drop
+#       out of the denominator, so a failing check could still score 100/100.
+#   (f) The signer check trusts the base branch's allowed_signers, not the PR's
+#       copy, so a PR can no longer enroll the key that signs it. Enrolling a new
+#       key takes a commit signed by a key the base already trusts.
+#   (g) Accepts the org secret GOVERNANCE_MIRROR_TOKEN (visibility: all) directly
+#       and prefers it, so `secrets: inherit` is enough and a stale repo-level
+#       GOVERNANCE_READ_TOKEN cannot shadow it.
+# ─────────────────────────────────────────────────────────────────────────────
 
 name: repo-governance-floor
 
@@ -103,6 +115,12 @@ on:
           warn-first (bundled checks only). Consumers wire it via
           `secrets: inherit` (org-level secret) or by passing it explicitly.
         required: false
+      GOVERNANCE_MIRROR_TOKEN:
+        description: >-
+          The org-wide read token under its org name (visibility: all). Preferred
+          over GOVERNANCE_READ_TOKEN when both are present. Flows in via
+          `secrets: inherit`.
+        required: false
 
     outputs:
       compliance_score:
@@ -142,20 +160,20 @@ jobs:
           ref: ${{ inputs.governance_ref }}
           path: governance
           fetch-depth: 1
-          token: ${{ secrets.GOVERNANCE_READ_TOKEN || github.token }}
+          token: ${{ secrets.GOVERNANCE_MIRROR_TOKEN || secrets.GOVERNANCE_READ_TOKEN || github.token }}
 
       - name: Gate — corpus checkout succeeded?
         id: gate
         env:
           GOV_CHECKOUT_OUTCOME: ${{ steps.gov_checkout.outcome }}
-          HAS_GOV_TOKEN: ${{ secrets.GOVERNANCE_READ_TOKEN != '' }}
+          HAS_GOV_TOKEN: ${{ secrets.GOVERNANCE_MIRROR_TOKEN != '' || secrets.GOVERNANCE_READ_TOKEN != '' }}
         run: |
           set -euo pipefail
           if [ "${GOV_CHECKOUT_OUTCOME}" != "success" ]; then
             if [ "${HAS_GOV_TOKEN}" = "true" ]; then
               echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED even with the supplied GOVERNANCE_READ_TOKEN — token may be expired, revoked, or lack contents:read on that repo. Remote check scripts SKIPPED (bundled checks still run)."
             else
-              echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED. The default github.token has no read access to that private repo. To enable the full check suite, add a repo-level or org-level secret named GOVERNANCE_READ_TOKEN (fine-grained PAT or GitHub App installation token with contents:read on Nebos-ai/nebos-governance) and pass 'secrets: inherit' from the consumer workflow. Bundled checks still run this pass."
+              echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED. The default github.token has no read access to that private repo. To enable the full check suite, pass 'secrets: inherit' from the consumer workflow so the org secret GOVERNANCE_MIRROR_TOKEN reaches it (or pass GOVERNANCE_READ_TOKEN explicitly). Bundled checks still run this pass."
             fi
             echo "have_corpus=false" >> "$GITHUB_OUTPUT"
           else
@@ -224,6 +242,7 @@ jobs:
           HARD_BYTES=$((HARD_KIB * 1024))
           if [ "$SIZE" -gt "$HARD_BYTES" ]; then
             echo "::error::AGENTS.md is ${SIZE} bytes (> ${HARD_KIB} KiB hard limit per Article XV AD-6a)"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           if [ "$SIZE" -gt "$WARN_BYTES" ]; then
@@ -261,18 +280,24 @@ jobs:
         if: inputs.allowed_signers_path != ''
         continue-on-error: true
         working-directory: consumer
+        env:
+          SIGNERS_PATH: ${{ inputs.allowed_signers_path }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if [[ ! -f "${{ inputs.allowed_signers_path }}" ]]; then
-            echo "::notice::${{ inputs.allowed_signers_path }} not present in consumer repo; skipping signer check (bootstrap posture)"
-            echo "passed=skipped" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
             echo "::notice::Not a pull_request context; SSH signer check applies to PR ranges only"
             echo "passed=n/a" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Trust the signer list on the base branch, never the PR's own copy:
+          # otherwise a PR can enroll the key that signs it. Enrolling a new key
+          # therefore takes a commit signed by a key the base already trusts.
+          TRUSTED="${RUNNER_TEMP:-/tmp}/allowed_signers.base"
+          if ! git show "${BASE_SHA}:${SIGNERS_PATH}" > "$TRUSTED" 2>/dev/null; then
+            echo "::notice::${SIGNERS_PATH} not present on the base branch; skipping signer check (bootstrap posture)"
+            echo "passed=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           COMMITS=$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}")
@@ -280,38 +305,45 @@ jobs:
           while IFS= read -r sha; do
             [[ -z "$sha" ]] && continue
             if ! git -c gpg.format=ssh \
-                     -c gpg.ssh.allowedSignersFile="${{ inputs.allowed_signers_path }}" \
+                     -c gpg.ssh.allowedSignersFile="$TRUSTED" \
                      verify-commit "$sha" 2>/dev/null; then
               echo "::error::${sha:0:12} SSH-verify FAILED"
               FAILED=$((FAILED + 1))
             fi
           done <<< "$COMMITS"
           if [[ $FAILED -gt 0 ]]; then
-            echo "::error::$FAILED commit(s) not SSH-signed by an allowed signer"
+            echo "::error::$FAILED commit(s) not SSH-signed by a signer the base branch trusts"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "passed=true" >> "$GITHUB_OUTPUT"
 
       - name: Compute compliance score
         id: score
+        env:
+          # `outcome` is a step's result before continue-on-error applies, so a
+          # check that exits non-zero without writing `passed=` still counts.
+          R_BASELINE: ${{ steps.baseline.outcome }}:${{ steps.baseline.outputs.passed }}
+          R_SIZE: ${{ steps.size.outcome }}:${{ steps.size.outputs.passed }}
+          R_BREF: ${{ steps.bref.outcome }}:${{ steps.bref.outputs.passed }}
+          R_DRIFT: ${{ steps.drift.outcome }}:${{ steps.drift.outputs.passed }}
+          R_TRIPLE: ${{ steps.triple.outcome }}:${{ steps.triple.outputs.passed }}
+          R_SIGN: ${{ steps.sign.outcome }}:${{ steps.sign.outputs.passed }}
         run: |
           set -euo pipefail
           TOTAL=0
           PASSED=0
-          for check in baseline size bref drift triple sign; do
-            case "$check" in
-              baseline) result="${{ steps.baseline.outputs.passed }}" ;;
-              size)     result="${{ steps.size.outputs.passed }}" ;;
-              bref)     result="${{ steps.bref.outputs.passed }}" ;;
-              drift)    result="${{ steps.drift.outputs.passed }}" ;;
-              triple)   result="${{ steps.triple.outputs.passed }}" ;;
-              sign)     result="${{ steps.sign.outputs.passed }}" ;;
+          for result in "$R_BASELINE" "$R_SIZE" "$R_BREF" "$R_DRIFT" "$R_TRIPLE" "$R_SIGN"; do
+            outcome="${result%%:*}"
+            passed="${result#*:}"
+            case "$outcome" in
+              failure|cancelled) TOTAL=$((TOTAL + 1)); continue ;;  # failed, whether or not it wrote passed=
+              skipped|"")        continue ;;                         # gated off by `if:` — not counted
             esac
-            case "$result" in
+            case "$passed" in
               true)        TOTAL=$((TOTAL + 1)); PASSED=$((PASSED + 1)) ;;
-              skipped|n/a) : ;;  # not counted in denominator
-              "")          : ;;  # step gated off (e.g. corpus unreachable) — not counted
-              *)           TOTAL=$((TOTAL + 1)) ;;  # failure
+              skipped|n/a) : ;;                       # check did not apply — not counted
+              *)           TOTAL=$((TOTAL + 1)) ;;    # succeeded without reporting a pass — fail closed
             esac
           done
           if [[ $TOTAL -eq 0 ]]; then
