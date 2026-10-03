@@ -66,6 +66,10 @@
 #   (g) Accepts the org secret GOVERNANCE_MIRROR_TOKEN (visibility: all) directly
 #       and prefers it, so `secrets: inherit` is enough and a stale repo-level
 #       GOVERNANCE_READ_TOKEN cannot shadow it.
+#   (h) The signer check also accepts commits GitHub signs itself with its
+#       web-flow key, but only "Update branch" merge commits and dependabot
+#       commits, verified against the pinned key fingerprint. Without this,
+#       every Update-branch click and dependabot PR fails the floor.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: repo-governance-floor
@@ -301,15 +305,41 @@ jobs:
             exit 0
           fi
           COMMITS=$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}")
+          # GitHub signs the commits it creates itself with its web-flow key:
+          # "Update branch" merges and dependabot commits. Accept exactly those two
+          # kinds, and only with a good signature from the pinned key below. Any
+          # other GitHub-signed commit (web-UI edits, squash commits) still fails.
+          # If GitHub rotates the key, this fails closed until the pin is updated.
+          WEBFLOW_FPR="968479A1AFF927E37D1A566BB5690EEEBB952194"
+          DEPENDABOT_EMAIL="49699333+dependabot[bot]@users.noreply.github.com"
+          # Two keyrings, kept apart: the SSH check runs against an empty gpg home so
+          # a GitHub (PGP) signature can never pass it; the web-flow key is consulted
+          # only for the two commit kinds below.
+          NO_GPG_KEYS=$(mktemp -d)
+          WEBFLOW_GPG=$(mktemp -d)
+          if ! curl -fsSL https://github.com/web-flow.gpg | GNUPGHOME="$WEBFLOW_GPG" gpg --batch --quiet --import 2>/dev/null; then
+            echo "::warning::Could not import GitHub's web-flow key; GitHub-signed commits are not accepted this run"
+          fi
           FAILED=0
           while IFS= read -r sha; do
             [[ -z "$sha" ]] && continue
-            if ! git -c gpg.format=ssh \
-                     -c gpg.ssh.allowedSignersFile="$TRUSTED" \
-                     verify-commit "$sha" 2>/dev/null; then
-              echo "::error::${sha:0:12} SSH-verify FAILED"
-              FAILED=$((FAILED + 1))
+            if GNUPGHOME="$NO_GPG_KEYS" git -c gpg.format=ssh \
+                   -c gpg.ssh.allowedSignersFile="$TRUSTED" \
+                   verify-commit "$sha" 2>/dev/null; then
+              continue
             fi
+            PARENTS=$(git rev-list --parents -n 1 "$sha" | wc -w)
+            AUTHOR=$(git log -1 --format='%ae' "$sha")
+            if [[ $PARENTS -gt 2 || "$AUTHOR" == "$DEPENDABOT_EMAIL" ]]; then
+              read -r SIG_STATUS SIG_FPR _ <<< "$(GNUPGHOME="$WEBFLOW_GPG" git log -1 --format='%G? %GP' "$sha" 2>/dev/null) _"
+              if [[ "$SIG_STATUS" =~ ^[GU]$ && "$SIG_FPR" == "$WEBFLOW_FPR" ]]; then
+                KIND=$([[ $PARENTS -gt 2 ]] && echo "merge commit" || echo "dependabot commit")
+                echo "::notice::${sha:0:12} accepted: ${KIND} signed by GitHub's web-flow key"
+                continue
+              fi
+            fi
+            echo "::error::${sha:0:12} SSH-verify FAILED"
+            FAILED=$((FAILED + 1))
           done <<< "$COMMITS"
           if [[ $FAILED -gt 0 ]]; then
             echo "::error::$FAILED commit(s) not SSH-signed by a signer the base branch trusts"
