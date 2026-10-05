@@ -36,7 +36,7 @@
                    ┌─────────────┴──────────────┐
                    ▼                            ▼
      ┌──────────────────────────┐  ┌──────────────────────────────┐
-     │ NEBBOS.AI (US)           │  │ NEBBOS TECHNOLOGIES d.o.o.   │
+     │ NEBBOS.AI (California)   │  │ NEBBOS TECHNOLOGIES d.o.o.   │
      │ Commercial entity:       │  │ (Belgrade, Serbia)           │
      │ sells subscriptions      │  │ Develops the Nebbos code     │
      │                          │  │ ★ OWNS THE IP TODAY          │
@@ -47,12 +47,12 @@
      │ Where Nebbos was first built and run on a real business   │
      └──────────────────────────────────────────────────────────┘
 ```
-*[CONFIRM: is Nebbos Technologies d.o.o. wholly owned by Nebbos Technologies (Delaware)? Is Nebbos.ai wholly owned by it? Is Nebbos.ai a corporation or an LLC, and in which state? The chart assumes both are 100% subsidiaries.]*
+*[CONFIRM: are Nebbos.ai (California corporation) and Nebbos Technologies d.o.o. wholly owned by Nebbos Technologies (Delaware)? The chart assumes both are 100% subsidiaries.]*
 
 | Entity | Jurisdiction | Role, in one sentence | Why it exists |
 |---|---|---|---|
 | **Nebbos Technologies** | Delaware, USA. Certificate of Incorporation file no. **10765583** *[confirm this is the Delaware file number for this entity]* | Group holding company. | Standard structure for international venture capital and governance. |
-| **Nebbos.ai** | USA | Sells Nebbos subscriptions. | Closeness to the largest software market. |
+| **Nebbos.ai** | **California corporation**, USA *[add CA Secretary of State entity number]* | Sells Nebbos subscriptions. | Closeness to the largest software market and its customers. |
 | **Nebbos Technologies d.o.o.** | Belgrade, Serbia | **Owns the Nebbos IP** and develops and maintains the code. | Serbian engineering talent; R&D incentives and the IP Box regime. |
 | **TR3I d.o.o.** | Serbia | **Independent company outside the group.** Where Nebbos was first built and where it was first used on live operations. | Origin story and first real-world proof. A related party, not a subsidiary. |
 
@@ -62,25 +62,49 @@
 
 ## 2a. Boards of directors
 
+*Bios are compiled from public sources (links at the end of this section). Have each person approve their bio before it is used externally.*
+
 ### Nebbos Technologies (Delaware holding company)
-| Role | Name | Status |
+| Role | Name | Background |
 |---|---|---|
-| Chair | **Dejan Matić** | Seated |
-| Director | **Mitch Richmond** | Seated |
-| Independent Director | **Patrick Kenny** | Seated |
-| Proposed Director | **Tucker Carlson** | Pending board approval |
-| Proposed Director | **Russ Yusupov** *[confirm spelling: written "Yusepov"]* | Pending board approval |
-| Proposed Director | **Rich Kleiman** *[confirm spelling: written "Klienman"]* | Pending board approval |
-| Proposed Director | **Michael Rubin** | Pending board approval |
+| Chair | **Dejan Matić** | Founder of Nebbos. Founder and CEO of TR3I d.o.o., the Serbian technology-services company where Nebbos was built. Co-founder of Universal Gamers Amateur Association (UGAA), an education-technology and esports company. *[ADD: education, prior roles, years in tech]* |
+| Director | **Mitch Richmond** | Naismith Basketball Hall of Fame (2014). Six-time NBA All-Star, 1989 Rookie of the Year, 2002 NBA champion (Lakers). Later held front-office roles: Golden State Warriors Director of Player Personnel, and Special Assistant to the GM of the Sacramento Kings. Co-founder of UGAA, and partnered with it through his education initiative ShaneED. |
+| Independent Director | **Patrick Kenny** | CEO and co-founder of UGAA. More than 30 years in consumer products. Led the TRAUB Consumer practice and was CEO of BevEquity Advisors. Built national beverage brands distributed through the Coca-Cola and Pepsi bottling networks, including Seagram's Mixers. *[CONFIRM the TRAUB/BevEquity profile is the same Patrick Kenny]* |
 
-*[CONFIRM: are the four pending members proposed as directors, independent directors, or advisors? The table assumes directors.]*
+**Proposed members, pending board approval. For internal use only; do not present to ITE until approved and consented:**
 
-### Nebbos.ai (US commercial entity)
-| Role | Name | Status |
+| Name | Background | Note for a Serbian government audience |
 |---|---|---|
-| Chair | **Mitch Richmond** | Seated |
-| Director | **Jason Argent** | Seated |
-| Independent Director | **Chris Mullin** | Seated |
+| **Tucker Carlson** | US political commentator. Founder of the Tucker Carlson Network (2023), a streaming platform and one of the most popular US podcasts. Former Fox News primetime host. | Highly polarising, and a political figure rather than a technology one. Could dominate the conversation. **Recommend not naming him to ITE.** |
+| **Rus Yusupov** *(spelling corrected from "Yusepov"; confirm)* | Co-founder of Vine (acquired by Twitter) and of HQ Trivia. Founder of the Big Human product studio. | Strong consumer-technology credibility. |
+| **Rich Kleiman** *(spelling corrected from "Klienman"; confirm)* | Co-founder of Thirty Five Ventures with Kevin Durant (more than 100 early-stage investments, including Coinbase and Acorns). CEO and co-founder of the Boardroom media network. Former Roc Nation artist manager. | Investment network. Mainly relevant to US go-to-market. |
+| **Michael Rubin** | Founder and CEO of Fanatics (about $35bn valuation, 2026). Founded GSI Commerce, which was sold to eBay for $2.4bn. Co-founder of the REFORM Alliance. | Proof of building at scale; well known. Mainly relevant to US go-to-market. |
+
+### Nebbos.ai (California corporation)
+| Role | Name | Background |
+|---|---|---|
+| Chair | **Mitch Richmond** | See above. |
+| Director | **Jason Argent** | Senior Vice President, Operations at 2K Sports (Take-Two Interactive), where he was head of business operations. He ran the P&L, product development and marketing, with more than 400% revenue growth over a 12-year tenure. Earlier: Red Bull (retail and sports marketing), Taco Bell, Miramax Films. Joined the UGAA board. |
+| Independent Director | **Chris Mullin** | Naismith Basketball Hall of Fame (2011 individually; 2010 with the 1992 "Dream Team"). Two-time Olympic gold medallist. Later General Manager of the Golden State Warriors, ESPN NBA analyst (2009–13), and head coach of St. John's University (2015–19). |
+
+**What the board says about the group, and how to frame it for ITE:**
+- The seated directors bring **operating, consumer-brand and governance experience** (Take-Two/2K, beverage brands, NBA front offices). They are not deep-tech AI credentials.
+- For ITE, the technical credibility has to come from the **Serbian d.o.o.'s engineering leadership**. Name the CTO or lead AI architect alongside the d.o.o. director.
+- Present the US boards as **"governance and access to US markets and capital"**. Present the d.o.o. leadership as **"who builds and supports it, here in Serbia"**.
+- Two NBA Hall of Famers on the boards are memorable. Serbia is a basketball country, so they work well as a **human, light touch** in conversation. Don't lead with them as qualifications for a government AI deal.
+
+<details><summary>Sources for the bios</summary>
+
+- Mitch Richmond: [Wikipedia](https://en.wikipedia.org/wiki/Mitch_Richmond), [St. John's](https://redstormsports.com/sports/mens-basketball/roster/coaches/mitch-richmond/256), [UGAA/ShaneED](https://www.thehypemagazine.com/2021/02/nba-legend-mitch-richmond-enters-equity-partnership-with-ugaa/)
+- Chris Mullin: [Wikipedia](https://en.wikipedia.org/wiki/Chris_Mullin), [NBA.com](https://www.nba.com/news/history-nba-legend-chris-mullin)
+- Patrick Kenny: [Apollo](https://www.apollo.io/people/Patrick/Kenny/54a6112e7468692abf4bc4bf), [TRAUB](https://www.traub.io/team/pat-kenny/), [UGAA board](https://ugaa.gg/2021/03/02/former-coca-cola-company-and-finance-executives-join-the-stem-and-esport-gaming-company-board/)
+- Jason Argent: [Comparably](https://www.comparably.com/companies/take-two-interactive-software/jason-argent), [citybiz: joins UGAA board](https://www.citybiz.co/article/68007/jason-argent-joins-ugaa-board/)
+- Rus Yusupov: [Wikipedia](https://en.wikipedia.org/wiki/Rus_Yusupov), [Crunchbase](https://www.crunchbase.com/person/rus-yusupov)
+- Rich Kleiman: [Wikipedia](https://en.wikipedia.org/wiki/Rich_Kleiman), [Gotham FC](https://www.gothamfc.com/ownership/rich-kleiman)
+- Michael Rubin: [Fanatics](https://www.fanaticsinc.com/michael-rubin), [CNBC, Jul 2026](https://www.cnbc.com/2026/07/18/fanatics-fanfest-michael-rubin.html)
+- Tucker Carlson: [Wikipedia](https://en.wikipedia.org/wiki/Tucker_Carlson), [PitchBook](https://pitchbook.com/profiles/company/538216-66)
+- Dejan Matić: internal Nebbos/TR3I documents; UGAA co-founder per [Apollo](https://www.apollo.io/people/Patrick/Kenny/54a6112e7468692abf4bc4bf). No public bio found.
+</details>
 
 ### Nebbos Technologies d.o.o. (Serbia, the IP owner)
 | Role | Name |
@@ -204,9 +228,9 @@ These sit in the **appendix and leave-behind**, not on the main slides. Have the
 ## 7. Open questions for you
 
 1. Who is the registered director of **Nebbos Technologies d.o.o.**? Please also give its company number (MB) and tax ID (PIB).
-2. Are Nebbos.ai and the d.o.o. **100% owned** by Nebbos Technologies (Delaware)? Is Nebbos.ai an Inc. or an LLC, and in which state?
+2. Are Nebbos.ai (California corporation) and the d.o.o. **100% owned** by Nebbos Technologies (Delaware)? What is Nebbos.ai's California entity number?
 3. **Officers** of each US entity: CEO, President, Secretary, Treasurer.
-4. One-line **bios** for each seated board member, and the correct spelling of "Yusupov" and "Kleiman".
+4. Fill in **Dejan Matić's** bio, and confirm the Patrick Kenny profile. Confirm the spellings "Yusupov" and "Kleiman".
 5. Are the four pending members proposed as **directors or advisors**, and have they **agreed to be named** externally?
 6. Is the **TR3I → Nebbos Technologies d.o.o. IP assignment** executed, and which entity filed the US provisional patent?
 7. Can we commit to a Serbia-hosted, locally-modelled deployment for a pilot, and on what timeline?
