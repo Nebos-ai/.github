@@ -51,7 +51,7 @@
 
 | Entity | Jurisdiction | Role, in one sentence | Why it exists |
 |---|---|---|---|
-| **Nebbos Technologies** | Delaware, USA | Group holding company. | Standard structure for international venture capital and governance. |
+| **Nebbos Technologies** | Delaware, USA. Certificate of Incorporation file no. **10765583** *[confirm this is the Delaware file number for this entity]* | Group holding company. | Standard structure for international venture capital and governance. |
 | **Nebbos.ai** | USA | Sells Nebbos subscriptions. | Closeness to the largest software market. |
 | **Nebbos Technologies d.o.o.** | Belgrade, Serbia | **Owns the Nebbos IP** and develops and maintains the code. | Serbian engineering talent; R&D incentives and the IP Box regime. |
 | **TR3I d.o.o.** | Serbia | **Independent company outside the group.** Where Nebbos was first built and where it was first used on live operations. | Origin story and first real-world proof. A related party, not a subsidiary. |
@@ -132,7 +132,7 @@ These sit in the **appendix and leave-behind**, not on the main slides. Have the
 
 | Area | Their question | What we need |
 |---|---|---|
-| **Legal standing** | Who exactly are we contracting with? | Serbian entity's registry extract (APR), company number (MB), tax ID (PIB), and authorised signatory. |
+| **Legal standing** | Who exactly are we contracting with? | Serbian entity's registry extract (APR), company number (MB), tax ID (PIB), and authorised signatory. For the parent: the Delaware Certificate of Incorporation (file no. 10765583) and a recent Certificate of Good Standing. |
 | **Beneficial ownership** | Who ultimately owns and controls you? | Entry in the Serbian beneficial-owner register, plus a simple cap-table summary (founders, investors, any foreign state-linked capital). |
 | **IP chain** | Who owns the software we would use, and who licenses it to us? | A clean chain: founder, employee and contractor assignments, plus the TR3I → Nebbos Technologies d.o.o. assignment. Then the d.o.o.'s licence to Nebbos.ai and the holding company. Then the licence grant to ITE. |
 | **Patent** | What is protected? | US provisional patent: 8 claim families, 16 claims, including "Knowledge System with Sovereign Export". State the filing entity and the plan for international (PCT) filing. |
