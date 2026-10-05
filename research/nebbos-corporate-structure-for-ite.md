@@ -125,6 +125,18 @@
 - Dejan Matić: internal Nebbos/TR3I documents; UGAA co-founder per [Apollo](https://www.apollo.io/people/Patrick/Kenny/54a6112e7468692abf4bc4bf). No public bio found.
 </details>
 
+### Officers
+| Role | Name | Entities | Background |
+|---|---|---|---|
+| **Treasurer** | **Shaun B. Higgins** | Nebbos Technologies (Delaware) and Nebbos.ai (California) | More than 30 years as a senior Coca-Cola system executive. **Former CFO of Coca-Cola Enterprises.** Former EVP and President of the European Group of Coca-Cola Enterprises (1999–2007); President, North American Sales; President and COO of Coca-Cola Ltd (Canada); earlier, CFO of Joyce Beverages. CPA who started at Ernst & Young; Pace University (magna cum laude); INSEAD Advanced Management Program. Former UGAA board member. |
+| CEO / President / Secretary | *[SUPPLY]* | | |
+
+> **Wording matters:** the public record says **Coca-Cola *Enterprises*** (the bottler, NYSE: CCE), not The Coca-Cola Company. In government and due-diligence material, write "former CFO of Coca-Cola Enterprises". A buyer who checks will find that "former CFO of Coca-Cola" overstates it.
+>
+> **Why he is useful with ITE:** a CPA and former public-company CFO as Treasurer is a strong answer to "can you be trusted with public money and audits?" Put him in the governance appendix.
+
+Sources: [Business Wire, Aug 2020](https://www.businesswire.com/news/home/20200812005079/en/Shaun-B.-Higgins-to-Join-UGAA-Board-Gerard-F.-Agoglia-to-Join-UGAA-as-CFO), [GlobeNewswire, 2010](https://www.globenewswire.com/news-release/2010/11/22/434855/207508/en/Former-Coca-Cola-Executive-Shaun-B-Higgins-Joins-as-an-Advisor-to-Drinks-Americas.html), [Prepared Foods](https://www.preparedfoods.com/articles/104771-management-changes-at-coca-cola-enterprises), [MarketScreener](https://www.marketscreener.com/insider/SHAUN-B-HIGGINS-A00LSK/)
+
 ### Nebbos Technologies d.o.o. (Serbia, the IP owner)
 | Role | Name |
 |---|---|
@@ -249,7 +261,7 @@ These sit in the **appendix and leave-behind**, not on the main slides. Have the
 1. The d.o.o.'s company number (MB) and tax ID (PIB). Is it **100% owned** by Nebbos Technologies (Delaware)?
 2. **Who is behind MRR Corp** (beneficial owner, jurisdiction)? What is Nebbos.ai's California entity number?
 3. Do the **IP licence (d.o.o. → Delaware)** and the **sublicence with royalty (Delaware → Nebbos.ai)** exist, and what are the royalty terms?
-4. **Officers** of each US entity: CEO, President, Secretary, Treasurer.
+4. **Officers** of each US entity: CEO, President and Secretary. The Treasurer is Shaun B. Higgins, for both.
 5. Fill in **Dejan Matić's** bio, and confirm the Patrick Kenny profile. Confirm the spellings "Yusupov" and "Kleiman".
 6. Are the four pending members proposed as **directors or advisors**, and have they **agreed to be named** externally?
 7. Is the **TR3I → Nebbos Technologies d.o.o. IP assignment** executed, and which entity filed the US provisional patent?
