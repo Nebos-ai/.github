@@ -29,32 +29,51 @@
 ## 2. The structure (confirmed 5 Oct 2026)
 
 ```
-              ┌──────────────────────────────────────────┐
-              │      NEBBOS TECHNOLOGIES (Delaware, US)   │
-              │      Group holding company                │
-              └──────────────────┬───────────────────────┘
-                   ┌─────────────┴──────────────┐
-                   ▼                            ▼
-     ┌──────────────────────────┐  ┌──────────────────────────────┐
-     │ NEBBOS.AI (California)   │  │ NEBBOS TECHNOLOGIES d.o.o.   │
-     │ Commercial entity:       │  │ (Belgrade, Serbia)           │
-     │ sells subscriptions      │  │ Develops the Nebbos code     │
-     │                          │  │ ★ OWNS THE IP TODAY          │
-     └──────────────────────────┘  └──────────────────────────────┘
+ ┌───────────────────────────┐     ┌───────────┐     ┌───────────────────────────────┐
+ │ NEBBOS TECHNOLOGIES (NT)  │     │ MRR CORP  │     │ INVESTMENT FUND (AIF)         │
+ │ Delaware holding company  │     │           │     │ managed by Star Finance,      │
+ │ File no. 10765583         │     │           │     │ Serbia                        │
+ └──────┬─────────────▲──────┘     └─────┬─────┘     └──────────────┬────────────────┘
+        │ 100%?       │                  │                          │
+        │             │ royalties        │                          │
+        │             │                  │                          │
+        │      ┌──────┴──────────────────┴──────────────────────────┴───┐
+        │      │ NEBBOS.AI: California corporation                      │
+        │      │ Owners: NT 40% · MRR Corp 40% · Star Finance fund 20%  │
+        │      │ Sells Nebbos subscriptions; pays royalties to NT       │
+        │      └────────────────────────────────────────────────────────┘
+        ▼
+ ┌──────────────────────────────────────────┐
+ │ NEBBOS TECHNOLOGIES d.o.o., Belgrade      │
+ │ Director: Dejan Matić                     │
+ │ ★ OWNS THE IP · develops the Nebbos code  │
+ └──────────────────────────────────────────┘
 
-     ┌──────────────────────────────────────────────────────────┐
-     │ TR3I d.o.o. (Serbia): HELD SEPARATELY, not in the group   │
-     │ Where Nebbos was first built and run on a real business   │
-     └──────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────┐
+ │ TR3I d.o.o. (Serbia): HELD SEPARATELY, not in the group   │
+ │ Where Nebbos was first built and run on a real business   │
+ └──────────────────────────────────────────────────────────┘
 ```
-*[CONFIRM: are Nebbos.ai (California corporation) and Nebbos Technologies d.o.o. wholly owned by Nebbos Technologies (Delaware)? The chart assumes both are 100% subsidiaries.]*
+*[CONFIRM: is Nebbos Technologies d.o.o. 100% owned by Nebbos Technologies (Delaware)? The chart assumes it is.]*
 
-| Entity | Jurisdiction | Role, in one sentence | Why it exists |
+| Entity | Jurisdiction | Owned by | Role, in one sentence |
 |---|---|---|---|
-| **Nebbos Technologies** | Delaware, USA. Certificate of Incorporation file no. **10765583** *[confirm this is the Delaware file number for this entity]* | Group holding company. | Standard structure for international venture capital and governance. |
-| **Nebbos.ai** | **California corporation**, USA *[add CA Secretary of State entity number]* | Sells Nebbos subscriptions. | Closeness to the largest software market and its customers. |
-| **Nebbos Technologies d.o.o.** | Belgrade, Serbia | **Owns the Nebbos IP** and develops and maintains the code. | Serbian engineering talent; R&D incentives and the IP Box regime. |
-| **TR3I d.o.o.** | Serbia | **Independent company outside the group.** Where Nebbos was first built and where it was first used on live operations. | Origin story and first real-world proof. A related party, not a subsidiary. |
+| **Nebbos Technologies** | Delaware, USA. Certificate of Incorporation file no. **10765583** | *[founders / cap table]* | Group holding company. Receives royalties from Nebbos.ai. |
+| **Nebbos Technologies d.o.o.** | Belgrade, Serbia. **Director: Dejan Matić** | Nebbos Technologies (Delaware) *[confirm 100%]* | **Owns the Nebbos IP**; develops and maintains the code. |
+| **Nebbos.ai** | **California corporation** *[add CA entity number]* | **Nebbos Technologies 40% · MRR Corp 40% · Star Finance-managed fund 20%** | Sells Nebbos subscriptions. Pays royalties to Nebbos Technologies (Delaware). |
+| **TR3I d.o.o.** | Serbia | Held separately | **Outside the group.** Where Nebbos was first built and first used on live operations. A related party, not a subsidiary. |
+
+### What this ownership means, and what to have ready
+1. **Nebbos.ai is not a subsidiary.**
+   - At 40%, Nebbos Technologies has an equal stake with MRR Corp, and neither controls Nebbos.ai on its own.
+   - Describe Nebbos.ai as a **"US commercial partner company in which the group holds 40%"**, not as "our US subsidiary".
+   - Control rests on the **shareholders' agreement**: board seats, reserved matters, and IP-licence termination rights. Have it ready for due diligence.
+2. **The IP licence chain must close.** The IP sits in the **d.o.o.**, but Nebbos.ai pays royalties to the **Delaware** company. So two documents need to exist:
+   - **d.o.o. → Delaware:** an IP licence with the right to sublicense. The d.o.o. must receive **arm's-length payment**; Serbian transfer-pricing rules apply, and the IP Box regime only benefits income actually earned in the d.o.o.
+   - **Delaware → Nebbos.ai:** a sublicence with a royalty.
+   - **[GET TAX/LEGAL ADVICE: if the d.o.o. is not paid for the IP, the "Serbian-owned IP" story and the Serbian tax position are both weakened.]**
+3. **Beneficial owners.** ITE (and the Serbian beneficial-owner register) will ask **who is behind MRR Corp**, and who the investors in the Star Finance fund are. Have a one-line answer for each.
+4. **Star Finance fund is a good fact for ITE.** A **Serbian licensed alternative investment fund** owns 20% of Nebbos.ai. That is domestic capital in the group, so mention it.
 
 **How to talk about TR3I:** "Nebbos was born inside TR3I, a Serbian services company that is still our first operational user." Present it as **history and proof**, not as part of the corporate structure. Make sure the IP transfer from TR3I to Nebbos Technologies d.o.o. is documented, because ITE's lawyers will ask how the IP moved. **[CONFIRM there is an executed assignment agreement.]**
 
@@ -109,9 +128,9 @@
 ### Nebbos Technologies d.o.o. (Serbia, the IP owner)
 | Role | Name |
 |---|---|
-| Director (direktor), statutory representative | *[SUPPLY: name from the APR registry]* |
+| Director (direktor), statutory representative | **Dejan Matić** |
 
-> **For ITE this is the board that matters most.** Their counterparty, the IP owner and the operator of any Serbia-hosted deployment is the d.o.o. Name its director and a Serbian technical lead on the slide.
+> **For ITE this is the entity that matters most.** It is their counterparty, the IP owner, and the operator of any Serbia-hosted deployment. Show **Dejan Matić as director**, plus a named Serbian technical lead (CTO or lead AI architect).
 
 ### Rules for showing the boards to ITE
 1. **Only show seated members.** Never present pending members as board members.
@@ -157,8 +176,8 @@ These sit in the **appendix and leave-behind**, not on the main slides. Have the
 | Area | Their question | What we need |
 |---|---|---|
 | **Legal standing** | Who exactly are we contracting with? | Serbian entity's registry extract (APR), company number (MB), tax ID (PIB), and authorised signatory. For the parent: the Delaware Certificate of Incorporation (file no. 10765583) and a recent Certificate of Good Standing. |
-| **Beneficial ownership** | Who ultimately owns and controls you? | Entry in the Serbian beneficial-owner register, plus a simple cap-table summary (founders, investors, any foreign state-linked capital). |
-| **IP chain** | Who owns the software we would use, and who licenses it to us? | A clean chain: founder, employee and contractor assignments, plus the TR3I → Nebbos Technologies d.o.o. assignment. Then the d.o.o.'s licence to Nebbos.ai and the holding company. Then the licence grant to ITE. |
+| **Beneficial ownership** | Who ultimately owns and controls you? | Entry in the Serbian beneficial-owner register for the d.o.o. A simple cap-table summary of the Delaware parent. For Nebbos.ai: NT 40%, MRR Corp 40% *[beneficial owner?]*, Star Finance-managed fund 20%. |
+| **IP chain** | Who owns the software we would use, and who licenses it to us? | A clean chain: founder, employee and contractor assignments, plus the TR3I → Nebbos Technologies d.o.o. assignment. Then the **d.o.o. → Delaware licence** (with sublicensing rights, at arm's length). Then the **Delaware → Nebbos.ai royalty-bearing sublicence**. For ITE, the d.o.o. contracts **directly**, so ITE's licence comes straight from the IP owner. |
 | **Patent** | What is protected? | US provisional patent: 8 claim families, 16 claims, including "Knowledge System with Sovereign Export". State the filing entity and the plan for international (PCT) filing. |
 | **US law exposure** | Can a US authority compel access to our data through your US parent? (CLOUD Act) | **The question that matters most to a sovereignty buyer.** We need a legal opinion plus a technical answer: deployment in the State Cloud or DCT colocation, operated by the Serbian entity, encryption keys held by ITE, and no access path from the US entities. **[GET COUNSEL]** |
 | **Data residency** | Where do our data, prompts and models run? | Today the product appears to run on Anthropic models and Railway, a US cloud. We need a **Serbia-hosted deployment option**: Kragujevac infrastructure, with models served locally (Mistral or open models on the national GPUs), or the Serbian LLM once it exists. |
@@ -181,7 +200,7 @@ These sit in the **appendix and leave-behind**, not on the main slides. Have the
   - "IP owned by Nebbos Technologies d.o.o., Belgrade"
   - "Built and maintained by our Serbian engineering team"
   - "First proven inside TR3I, a Serbian company"
-  - "Global sales and capital: Nebbos.ai / Delaware"
+  - "US holding company and US commercial partner (Nebbos.ai)"
 - *Speaker note:* "Everything that makes Nebbos work was invented here and is maintained here. We use a US structure the same way successful Serbian tech companies have: to reach customers and investors abroad. For your office, your counterparty would be our Serbian company."
 
 **[Slide B] For ITE, a Serbian company signs, Serbian infrastructure hosts, and the State controls the keys.**
@@ -227,10 +246,11 @@ These sit in the **appendix and leave-behind**, not on the main slides. Have the
 
 ## 7. Open questions for you
 
-1. Who is the registered director of **Nebbos Technologies d.o.o.**? Please also give its company number (MB) and tax ID (PIB).
-2. Are Nebbos.ai (California corporation) and the d.o.o. **100% owned** by Nebbos Technologies (Delaware)? What is Nebbos.ai's California entity number?
-3. **Officers** of each US entity: CEO, President, Secretary, Treasurer.
-4. Fill in **Dejan Matić's** bio, and confirm the Patrick Kenny profile. Confirm the spellings "Yusupov" and "Kleiman".
-5. Are the four pending members proposed as **directors or advisors**, and have they **agreed to be named** externally?
-6. Is the **TR3I → Nebbos Technologies d.o.o. IP assignment** executed, and which entity filed the US provisional patent?
-7. Can we commit to a Serbia-hosted, locally-modelled deployment for a pilot, and on what timeline?
+1. The d.o.o.'s company number (MB) and tax ID (PIB). Is it **100% owned** by Nebbos Technologies (Delaware)?
+2. **Who is behind MRR Corp** (beneficial owner, jurisdiction)? What is Nebbos.ai's California entity number?
+3. Do the **IP licence (d.o.o. → Delaware)** and the **sublicence with royalty (Delaware → Nebbos.ai)** exist, and what are the royalty terms?
+4. **Officers** of each US entity: CEO, President, Secretary, Treasurer.
+5. Fill in **Dejan Matić's** bio, and confirm the Patrick Kenny profile. Confirm the spellings "Yusupov" and "Kleiman".
+6. Are the four pending members proposed as **directors or advisors**, and have they **agreed to be named** externally?
+7. Is the **TR3I → Nebbos Technologies d.o.o. IP assignment** executed, and which entity filed the US provisional patent?
+8. Can we commit to a Serbia-hosted, locally-modelled deployment for a pilot, and on what timeline?
