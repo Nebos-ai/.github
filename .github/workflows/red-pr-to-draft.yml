@@ -1,0 +1,95 @@
+# Nebos-ai reusable workflow — red-pr-to-draft v1
+#
+# Founder directive 2026-10-13 (tracker task 49347557): no agent may leave a PR
+# presented as ready while its tests fail. This is the server-side half: when a
+# CI workflow finishes RED on an open, non-draft PR, the PR is converted back to
+# draft and one comment names the failing checks and the head SHA.
+#
+# Consumers call it from a `workflow_run` workflow that lists their own
+# test-bearing workflows by name (event payloads cannot be listed here):
+#
+#   on:
+#     workflow_run:
+#       workflows: ["CI", "Lint"]
+#       types: [completed]
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#     checks: read
+#     actions: read
+#   jobs:
+#     draft:
+#       uses: Nebos-ai/.github/.github/workflows/red-pr-to-draft.yml@pr-guard-v1
+#
+# Why workflow_run and not check_suite: suites created by GitHub Actions do not
+# trigger workflows. Why it is safe: the workflow runs from the default branch,
+# never checks out or executes PR code, and only reads check metadata.
+#
+# Acts only when ALL hold:
+#   - the run concluded failure | timed_out | startup_failure (cancelled runs are
+#     superseded runs and are ignored)
+#   - the PR is open, not already draft, and its CURRENT head SHA equals the
+#     run's head SHA (a stale red run never drafts a newer push)
+# It never marks a PR ready; that stays a deliberate act once every check is green.
+
+name: red-pr-to-draft (reusable)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: read
+  actions: read
+
+jobs:
+  draft:
+    name: convert red PR to draft
+    if: ${{ contains(fromJSON('["failure","timed_out","startup_failure"]'), github.event.workflow_run.conclusion) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Serialise per head SHA so two red workflows finishing together produce one
+    # comment: the second run sees the PR already draft and exits.
+    concurrency:
+      group: red-pr-to-draft-${{ github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_NAME: ${{ github.event.workflow_run.name }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Draft open non-draft PRs whose head is this red run
+        run: |
+          set -euo pipefail
+          prs=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --paginate \
+            | jq -c --arg sha "$HEAD_SHA" --arg repo "$REPO" \
+                '.[] | select(.state=="open" and .draft==false and .head.sha==$sha and .head.repo.full_name==$repo) | {number, node_id}')
+          if [ -z "$prs" ]; then
+            echo "No open non-draft PR has head $HEAD_SHA; nothing to do."
+            exit 0
+          fi
+          failing=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --paginate \
+            | jq -r '.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="startup_failure") | .name' \
+            | sort -u | sed 's/^/- `/; s/$/`/')
+          [ -n "$failing" ] || failing="- \`$RUN_NAME\` (see $RUN_URL)"
+          echo "$prs" | while IFS= read -r pr; do
+            number=$(jq -r .number <<<"$pr")
+            node=$(jq -r .node_id <<<"$pr")
+            gh api graphql -f query='mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }' -f id="$node" >/dev/null
+            body=$(printf '%s\n' \
+              "**Converted to draft: CI is red on this PR.**" \
+              "" \
+              "Head SHA: \`$HEAD_SHA\`" \
+              "" \
+              "Failing checks:" \
+              "$failing" \
+              "" \
+              "Triggering run: $RUN_URL" \
+              "" \
+              "Fix the cause and push. Mark the PR ready for review again only once every check is green.")
+            gh api "repos/$REPO/issues/$number/comments" -f body="$body" >/dev/null
+            echo "PR #$number drafted and commented."
+          done
