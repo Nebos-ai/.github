@@ -19,7 +19,15 @@
 #     actions: read
 #   jobs:
 #     draft:
-#       uses: Nebos-ai/.github/.github/workflows/red-pr-to-draft.yml@pr-guard-v1
+#       uses: Nebos-ai/.github/.github/workflows/red-pr-to-draft.yml@pr-guard-v2
+#       secrets: inherit
+#
+# Why a GitHub App token (v2): GITHUB_TOKEN is refused on the
+# convertPullRequestToDraft mutation ("Resource not accessible by integration",
+# nebos-billing run 38357787904), so v1 could never flip a PR. v2 mints a 1-hour
+# token for the Nebbos MCP bot App (5032125) scoped to the calling repo with
+# pull-requests: write only; every read still uses GITHUB_TOKEN. The key is the
+# org secret PR_GUARD_APP_PRIVATE_KEY (founder decision 2026-10-13, task 49347557).
 #
 # Why workflow_run and not check_suite: suites created by GitHub Actions do not
 # trigger workflows. Why it is safe: the workflow runs from the default branch,
@@ -36,6 +44,10 @@ name: red-pr-to-draft (reusable)
 
 on:
   workflow_call:
+    secrets:
+      PR_GUARD_APP_PRIVATE_KEY:
+        description: Private key of the Nebbos MCP bot GitHub App (5032125). Org secret.
+        required: true
 
 permissions:
   contents: read
@@ -61,7 +73,18 @@ jobs:
       RUN_NAME: ${{ github.event.workflow_run.name }}
       RUN_URL: ${{ github.event.workflow_run.html_url }}
     steps:
+      - name: Mint a 1-hour Nebbos MCP bot App token (this repo, pull requests only)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: "5032125"
+          private-key: ${{ secrets.PR_GUARD_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
       - name: Draft open non-draft PRs whose head is this red run
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           prs=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --paginate \
@@ -78,7 +101,7 @@ jobs:
           echo "$prs" | while IFS= read -r pr; do
             number=$(jq -r .number <<<"$pr")
             node=$(jq -r .node_id <<<"$pr")
-            gh api graphql -f query='mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }' -f id="$node" >/dev/null
+            GH_TOKEN="$APP_TOKEN" gh api graphql -f query='mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }' -f id="$node" >/dev/null
             body=$(printf '%s\n' \
               "**Converted to draft: CI is red on this PR.**" \
               "" \
@@ -90,6 +113,6 @@ jobs:
               "Triggering run: $RUN_URL" \
               "" \
               "Fix the cause and push. Mark the PR ready for review again only once every check is green.")
-            gh api "repos/$REPO/issues/$number/comments" -f body="$body" >/dev/null
+            GH_TOKEN="$APP_TOKEN" gh api "repos/$REPO/issues/$number/comments" -f body="$body" >/dev/null
             echo "PR #$number drafted and commented."
           done
