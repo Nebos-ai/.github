@@ -1,0 +1,279 @@
+# Nebos-ai reusable workflow: main-red-alarm
+#
+# Task 959b9f97 (PHTW-49), founder-approved 2026-10-17. A workflow that keeps failing on main
+# with nobody told is silent breakage (frontend refresh-system-map-seed failed 16 of 16 runs).
+# This sweep makes it loud, once:
+#
+#   RED    a workflow's two newest push/schedule runs on main both failed
+#          -> ONE alarm for repo + workflow: a tracker task (when a tracker service key is
+#             available to the repo) or, with no key, ONE GitHub issue labelled main-red.
+#             Later red runs add a comment to the same alarm, never a second alarm.
+#   GREEN  that workflow's newest run on main (push, schedule or manual) succeeded
+#          -> the alarm is closed with a comment naming the green run.
+#
+# Cancelled / skipped / neutral runs are ignored. pull_request and merge_group runs are not on
+# main and are never read. This workflow's own runs are skipped so it cannot alarm on itself.
+#
+# Canonical home: this file (Nebos-ai/.github). The five core repos call it from a thin
+# main-red-alarm.yml (schedule every 30 min + manual):
+#
+#   on:
+#     schedule: [{cron: "*/30 * * * *"}]
+#     workflow_dispatch: {}
+#   permissions: {contents: read, actions: read, issues: write}
+#   concurrency: {group: main-red-alarm, cancel-in-progress: false}
+#   jobs:
+#     alarm:
+#       uses: Nebos-ai/.github/.github/workflows/main-red-alarm.yml@main
+#       secrets: inherit
+#
+# Tracker auth reuses the pattern of scripts/ci/create_bug_task.py and close-on-merge: the first
+# service key found among NEBOS_PROJECTS_SERVICE_KEY, NEBOS_SERVICE_KEY, NEBOS_SERVICE_TOKEN is
+# exchanged at POST /auth/service-token for a short-lived bearer. No secret value is ever printed.
+
+name: main-red-alarm (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: "Log what would be opened or closed; write nothing."
+        type: boolean
+        default: false
+    secrets:
+      NEBOS_PROJECTS_SERVICE_KEY:
+        required: false
+      NEBOS_SERVICE_KEY:
+        required: false
+      NEBOS_SERVICE_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  sweep:
+    name: main-red sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+      K1: ${{ secrets.NEBOS_PROJECTS_SERVICE_KEY }}
+      K2: ${{ secrets.NEBOS_SERVICE_KEY }}
+      K3: ${{ secrets.NEBOS_SERVICE_TOKEN }}
+    steps:
+      - name: Sweep workflows on main and open or close alarms
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import datetime, json, math, os, sys, urllib.error, urllib.parse, urllib.request
+
+          REPO = os.environ["REPO"]
+          REPO_NAME = REPO.rsplit("/", 1)[-1]
+          DRY = os.environ.get("DRY_RUN") == "1"
+          GH = "https://api.github.com"
+          PROJECTS_API = "https://projects-api-production-199c.up.railway.app"
+          BUGS_PROJECT = "df4b0be2-7741-49dd-b6bc-9a2955d31334"
+          ENG_DEPT = "00000000-0000-4000-8000-0000000000d0"
+          LABEL = "main-red"
+          BAD = {"failure", "timed_out", "startup_failure"}
+          COUNTED = BAD | {"success"}
+
+          def call(method, url, body=None, token=None, accept="application/json"):
+              data = json.dumps(body).encode() if body is not None else None
+              h = {"Accept": accept, "Authorization": f"Bearer {token}"}
+              if data is not None:
+                  h["Content-Type"] = "application/json"
+              req = urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      raw = r.read()
+                      return r.status, (json.loads(raw) if raw else None)
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode(errors="replace")
+                  try:
+                      return e.code, json.loads(raw)
+                  except ValueError:
+                      return e.code, raw
+              except Exception as exc:
+                  return 0, str(exc)
+
+          GHT = os.environ["GH_TOKEN"]
+          def gh(method, path, body=None):
+              return call(method, f"{GH}/repos/{REPO}{path}", body, GHT, "application/vnd.github+json")
+
+          # ---- tracker auth (optional) ------------------------------------------------
+          tracker_token = None
+          for name in ("K1", "K2", "K3"):
+              key = os.environ.get(name, "").strip()
+              if not key:
+                  continue
+              st, body = call("POST", f"{PROJECTS_API}/auth/service-token", {"key": key})
+              if st == 200 and isinstance(body, dict):
+                  data = body.get("data", body)
+                  tok = data.get("access_token") if isinstance(data, dict) else None
+                  if tok:
+                      print(f"::add-mask::{tok}")
+                      tracker_token = tok
+                      print(f"tracker auth: key {name} exchanged")
+                      break
+              print(f"::notice::tracker key {name} not usable (HTTP {st})")
+          if not tracker_token:
+              print("::notice::no usable tracker service key; alarms go to GitHub issues labelled main-red")
+
+          def tracker(method, path, body=None):
+              return call(method, f"{PROJECTS_API}{path}", body, tracker_token)
+
+          # ---- evaluate each workflow -------------------------------------------------
+          st, wfs = gh("GET", "/actions/workflows?per_page=100")
+          if st != 200:
+              print(f"::error::cannot list workflows (HTTP {st}): {str(wfs)[:200]}")
+              sys.exit(1)
+          verdicts = []
+          for wf in wfs.get("workflows", []):
+              if wf.get("state") != "active" or "main-red-alarm" in wf.get("path", ""):
+                  continue
+              st, runs = gh("GET", f"/actions/workflows/{wf['id']}/runs?branch=main&status=completed&per_page=20")
+              if st != 200:
+                  print(f"::warning::cannot read runs of {wf['name']} (HTTP {st})")
+                  continue
+              rs = [r for r in runs.get("workflow_runs", [])
+                    if r.get("event") in ("push", "schedule", "workflow_dispatch")
+                    and r.get("conclusion") in COUNTED]
+              if not rs:
+                  continue
+              newest = rs[0]
+              auto = [r for r in rs if r["event"] in ("push", "schedule")]
+              if newest["conclusion"] == "success":
+                  verdicts.append(("green", wf, newest))
+              elif len(auto) >= 2 and auto[0]["conclusion"] in BAD and auto[1]["conclusion"] in BAD:
+                  verdicts.append(("red", wf, auto[0]))
+
+          reds = [v for v in verdicts if v[0] == "red"]
+          print(f"workflows judged: {len(verdicts)} ({len(reds)} red)")
+
+          # ---- alarm stores -----------------------------------------------------------
+          def title_for(wf):
+              return f"Main red: {REPO_NAME} / {wf['name']}"
+
+          def find_issue(title):
+              st, rows = gh("GET", f"/issues?labels={LABEL}&state=open&per_page=100")
+              if st != 200 or not isinstance(rows, list):
+                  return None
+              for r in rows:
+                  if r.get("title") == title and "pull_request" not in r:
+                      return r
+              return None
+
+          _task_cache = {}
+          def find_task(title):
+              if not tracker_token:
+                  return None
+              if "rows" not in _task_cache:
+                  q = urllib.parse.urlencode({"project_id": BUGS_PROJECT, "limit": 200})
+                  st, body = tracker("GET", f"/api/v1/tasks?{q}")
+                  rows = body if isinstance(body, list) else (body or {}).get("tasks", []) if isinstance(body, dict) else []
+                  _task_cache["rows"] = rows if st == 200 and isinstance(rows, list) else []
+              for t in _task_cache["rows"]:
+                  if isinstance(t, dict) and t.get("title") == title and \
+                     str(t.get("status", "")).lower() not in ("done", "complete", "cancelled"):
+                      return t
+              return None
+
+          def workdays(start, n):
+              d = start
+              while n > 0:
+                  d += datetime.timedelta(days=1)
+                  if d.weekday() < 5:
+                      n -= 1
+              return d
+
+          def run_line(run):
+              return f"run {run['id']} ({run['event']}, {run['conclusion']}) {run['html_url']} at commit {run['head_sha'][:7]}"
+
+          def task_has(tid, needle):
+              st, body = tracker("GET", f"/api/v1/tasks/{tid}/comments")
+              if st != 200:
+                  return True  # cannot tell: stay quiet rather than spam
+              return needle in json.dumps(body)
+
+          failed = False
+          def open_or_update(wf, run):
+              global failed
+              title = title_for(wf)
+              streak = (f"The workflow `{wf['name']}` ({wf['path']}) failed on main twice in a row. "
+                        f"Latest: {run_line(run)}.")
+              task = find_task(title)
+              issue = find_issue(title)
+              if DRY:
+                  print(f"[dry-run] RED {title}: would {'comment on' if (task or issue) else 'open'} alarm")
+                  return
+              if task:
+                  if not task_has(task["id"], str(run["id"])):
+                      tracker("POST", f"/api/v1/tasks/{task['id']}/comments", {"body": f"Still red on main. {run_line(run)}"})
+                  print(f"RED {title}: updated task {task.get('short_id') or task['id']}")
+                  return
+              if issue:
+                  st, cm = gh("GET", f"/issues/{issue['number']}/comments?per_page=100")
+                  if str(run["id"]) not in json.dumps(cm):
+                      gh("POST", f"/issues/{issue['number']}/comments", {"body": f"Still red on main. {run_line(run)}"})
+                  print(f"RED {title}: updated issue #{issue['number']}")
+                  return
+              if tracker_token:
+                  today = datetime.datetime.now(datetime.timezone.utc).date()
+                  desc = (streak + "\n\nFiled by the main-red-alarm workflow (Nebos-ai/.github). "
+                          "It closes this task when the workflow's newest run on main is green. "
+                          "Fix the cause; do not mute the alarm.")
+                  st, body = tracker("POST", "/api/v1/tasks", {
+                      "title": title, "description": desc, "project_id": BUGS_PROJECT,
+                      "department_id": ENG_DEPT, "status": "ready", "source": "ci-failure-emitter",
+                      "priority": "high", "tags": ["qa:bug", "qa:sev:high"],
+                      "estimated_hours": 2.0, "start_date": today.isoformat(),
+                      "due_date": workdays(today, 1).isoformat()})
+                  if st in (200, 201) and isinstance(body, dict):
+                      print(f"RED {title}: opened task {body.get('short_id') or body.get('id')}")
+                      return
+                  print(f"::warning::tracker task create failed (HTTP {st}): {str(body)[:300]}; falling back to a GitHub issue")
+              gh("POST", "/labels", {"name": LABEL, "color": "B60205", "description": "A workflow keeps failing on main"})
+              st, body = gh("POST", "/issues", {"title": title, "labels": [LABEL],
+                            "body": streak + "\n\nFiled by the main-red-alarm workflow. It closes this issue when the workflow's newest run on main is green."})
+              if st in (200, 201):
+                  print(f"RED {title}: opened issue #{body['number']}")
+              else:
+                  print(f"::error::could not open an alarm for {title} (HTTP {st}): {str(body)[:300]}")
+                  failed = True
+
+          def close_if_open(wf, run):
+              global failed
+              title = title_for(wf)
+              task = find_task(title)
+              issue = find_issue(title)
+              if not (task or issue):
+                  return
+              note = f"Green again on main: {run_line(run)}. Closing this alarm."
+              if DRY:
+                  print(f"[dry-run] GREEN {title}: would close")
+                  return
+              if task:
+                  tracker("POST", f"/api/v1/tasks/{task['id']}/comments", {"body": note})
+                  st, body = tracker("POST", f"/api/v1/tasks/{task['id']}/transition", {"to_status": "done"})
+                  print(f"GREEN {title}: task {task.get('short_id') or task['id']} -> done (HTTP {st})")
+                  if st >= 300:
+                      print(f"::warning::could not close task: {str(body)[:300]}")
+                      failed = True
+              if issue:
+                  gh("POST", f"/issues/{issue['number']}/comments", {"body": note})
+                  st, _ = gh("PATCH", f"/issues/{issue['number']}", {"state": "closed", "state_reason": "completed"})
+                  print(f"GREEN {title}: issue #{issue['number']} closed (HTTP {st})")
+
+          for kind, wf, run in verdicts:
+              if kind == "red":
+                  open_or_update(wf, run)
+              else:
+                  close_if_open(wf, run)
+          sys.exit(1 if failed else 0)
+          PY
