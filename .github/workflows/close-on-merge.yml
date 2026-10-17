@@ -1,0 +1,77 @@
+# Nebos-ai reusable workflow: close-on-merge (NPTE-181).
+#
+# One implementation of "a merged PR moves the tasks it names" for every Nebos-ai repo.
+# The logic is scripts/close_on_merge.py in THIS repo; the fixtures are tests/ and run in
+# close-on-merge-tests.yml. The five per-repo copies that closed any bare UUID are gone.
+#
+# Rule: only lines that start with Task:, Tasks:, Closes: or Refs: (any case) name a task, and
+# only full UUIDs on them count. Prose, quotes, code blocks and checklist lines are ignored.
+# Short ids on those lines are logged as a notice and not resolved yet.
+#
+# Caller (pin to a commit SHA, GitHub's recommended form for third-party-style reuse):
+#
+#   name: close-on-merge
+#   on:
+#     pull_request:
+#       types: [closed]
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   jobs:
+#     close-on-merge:
+#       if: github.event.pull_request.merged == true
+#       uses: Nebos-ai/.github/.github/workflows/close-on-merge.yml@<commit-sha>
+#       secrets: inherit
+#       with:
+#         api_base: https://<tracker-api-host>   # optional when the repo has a NEBOS_API_BASE secret
+#
+# GitHub rules relied on (docs.github.com, "Reuse workflows" and "Contexts reference"):
+#   - A called workflow reads the CALLER's github.event, so github.event.pull_request is the
+#     merged PR. Workflows in the same organization can pass all secrets with `secrets: inherit`;
+#     an inherited secret can be read in the called workflow without declaring it.
+#   - `{owner}/{repo}/.github/workflows/{file}@{ref}`: ref can be a SHA, tag or branch; the SHA is
+#     the safest. This repo is public, so no Actions access setting is needed to call it.
+#   - job.workflow_repository and job.workflow_sha give the reusable workflow's own repo and
+#     commit, so the script that runs is the one at the commit the caller pinned.
+#
+# Secrets (read from the caller, never stored here): NEBOS_SERVICE_KEY, or NEBOS_SERVICE_TOKEN
+# for nebos-projects; NEBOS_API_BASE when the repo has it as a secret.
+
+name: close-on-merge (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      api_base:
+        description: Tracker API base URL, used when the NEBOS_API_BASE secret is not set.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  close-on-merge:
+    name: close-on-merge
+    if: ${{ github.event.pull_request.merged == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch the script at this workflow's own commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .close-on-merge
+          persist-credentials: false
+      - name: Move the tasks named on explicit Task:/Refs: lines
+        env:
+          NEBOS_SERVICE_KEY: ${{ secrets.NEBOS_SERVICE_KEY || secrets.NEBOS_SERVICE_TOKEN }}
+          NEBOS_API_BASE: ${{ secrets.NEBOS_API_BASE || inputs.api_base }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+        run: python3 .close-on-merge/scripts/close_on_merge.py
