@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nebos-ai/.github/blob/main/schemas/automations-manifest.schema.json",
+  "title": "Nebbos automations manifest (.nebbos/automations.yaml)",
+  "description": "One file per repo. Declares every automation the repo owns so the automation registry learns about it in the PR that adds it (tasks AUT-61, AUT-62).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "repo", "automations"],
+  "properties": {
+    "version": {"const": 1},
+    "repo": {"type": "string", "minLength": 1, "description": "Repository name without the org, e.g. nebos-billing."},
+    "automations": {"type": "array", "items": {"$ref": "#/$defs/automation"}}
+  },
+  "$defs": {
+    "runner": {
+      "enum": ["celery_beat", "temporal", "github_actions", "railway_cron", "in_process", "api_route", "mcp_tool", "ui_button", "db_trigger", "webhook", "n8n", "device", "manual_script"]
+    },
+    "automation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "name", "description", "runner", "triggers", "schedule", "expected_interval_minutes", "run_now", "risk_tier", "scope", "owner_team", "source_path"],
+      "properties": {
+        "slug": {"type": "string", "pattern": "^[a-z0-9]+\\.[a-z0-9]+(-[a-z0-9]+)*$", "description": "<repo-short>.<kebab-name>; repo-short is the repo name minus a nebos-/nebbos- prefix."},
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "runner": {"$ref": "#/$defs/runner"},
+        "triggers": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["schedule", "manual", "event", "api"]}},
+        "schedule": {"type": ["string", "null"], "description": "Cron expression in UTC, or null."},
+        "expected_interval_minutes": {"type": ["integer", "null"], "minimum": 1, "description": "Longest gap between runs before the watchdog calls it missed. null for event or manual-only."},
+        "run_now": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target"],
+          "properties": {
+            "kind": {"enum": ["celery_task", "github_workflow_dispatch", "http_post", "workflow_execute", "temporal_start", "none"]},
+            "target": {"type": ["string", "null"]}
+          }
+        },
+        "risk_tier": {"enum": [1, 2, 3], "description": "1 read, 2 write, 3 money or destructive."},
+        "scope": {"enum": ["system", "per_tenant", "device"]},
+        "owner_team": {"type": "string", "minLength": 1, "description": "Tracker department slug."},
+        "source_path": {"type": "string", "minLength": 1, "description": "Repo-relative path (a path:line suffix is allowed) where the automation is defined."}
+      }
+    }
+  }
+}
