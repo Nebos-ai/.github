@@ -1,0 +1,27 @@
+version: 1
+repo: nebos-example
+automations:
+  - slug: example.nightly-report
+    name: Nightly report
+    description: Builds the nightly report and posts it to the tracker
+    runner: github_actions
+    triggers: [schedule, manual]
+    schedule: "0 6 * * *"
+    expected_interval_minutes: 1440
+    run_now: {kind: github_workflow_dispatch, target: close-on-merge.yml}
+    risk_tier: 1
+    scope: system
+    owner_team: engineering
+    source_path: .github/workflows/close-on-merge.yml
+  - slug: example.on-demand-sync
+    name: On-demand sync
+    description: Syncs one record when an operator asks
+    runner: api_route
+    triggers: [api, manual]
+    schedule: null
+    expected_interval_minutes: null
+    run_now: {kind: http_post, target: /api/v1/example/sync}
+    risk_tier: 2
+    scope: per_tenant
+    owner_team: engineering
+    source_path: .github/workflows/close-on-merge.yml:1

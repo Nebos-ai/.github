@@ -94,3 +94,28 @@ individually via a coordinated PR wave.
 - Depends on: `nebos-governance/scripts/repo_structure_v5/` canonical home
   (RSSB-14 landed via PR #2229) + Constitution Article XV (ratified via
   PR #2222 merge commit `4481d587`).
+
+
+### `sync-automations-manifest.yml` and the `report-automation-run` action (AUT-61, AUT-62)
+
+Registration at creation and a run record for every run, for the Nebbos automation registry.
+
+- **Manifest.** Each repo keeps `.nebbos/automations.yaml` (schema: `schemas/automations-manifest.schema.json`).
+  A thin caller workflow runs `sync-automations-manifest.yml` on pull requests (validate only) and on pushes
+  to main that change the file (validate, then `PUT /api/v1/automations/manifests/{repo}`). Caller template
+  is in the header of the workflow file.
+- **Run record.** Append to a scheduled job as the last step:
+
+  ```yaml
+  - name: Report run to the automation registry
+    if: always()
+    uses: Nebos-ai/.github/.github/actions/report-automation-run@<commit-sha>
+    with:
+      slug: billing.generate-invoices
+      service-key: ${{ secrets.NEBOS_SERVICE_KEY }}
+      backend-url: ${{ secrets.NEBOS_BACKEND_URL }}   # optional, defaults to https://api.nebbos.ai
+  ```
+
+  The job needs `actions: read` for an exact duration. The step never fails the calling job.
+- Both authenticate with a repo service key exchanged at `POST /auth/service-token`, the same pattern as
+  `main-red-alarm` and the billing job workflows, and both warn and pass while the registry endpoint is not deployed.

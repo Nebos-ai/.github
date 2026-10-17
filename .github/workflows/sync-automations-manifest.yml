@@ -1,0 +1,103 @@
+# Nebos-ai reusable workflow: sync-automations-manifest (task AUT-61, project AUT e59d86d8).
+#
+# Every repo declares its automations in .nebbos/automations.yaml. This workflow
+#   1. validates that file against schemas/automations-manifest.schema.json (plus repo name,
+#      slug prefix, uniqueness and source_path checks), on every call; and
+#   2. on a push to main (or a manual run on main), PUTs the manifest as JSON to the registry:
+#      PUT /api/v1/automations/manifests/{repo}   (nebos-backend, service token).
+# On pull_request it only validates, so a bad manifest fails the PR that adds it.
+#
+# Fail-soft: while the registry endpoint is not deployed (404), or no service key is usable, the
+# sync step warns and passes. A manifest the registry rejects (400/422) fails the run.
+#
+# Caller (copy as .github/workflows/sync-automations-manifest.yml; pin to a commit SHA):
+#
+#   name: sync-automations-manifest
+#   on:
+#     pull_request:
+#       paths: [".nebbos/automations.yaml"]
+#     push:
+#       branches: [main]
+#       paths: [".nebbos/automations.yaml"]
+#     workflow_dispatch: {}
+#   permissions:
+#     contents: read
+#   jobs:
+#     sync:
+#       uses: Nebos-ai/.github/.github/workflows/sync-automations-manifest.yml@<commit-sha>
+#       secrets: inherit
+#
+# Auth reuses the pattern main-red-alarm and the billing job workflows already use: a repo service
+# key (first found of NEBOS_SERVICE_KEY, NEBOS_PROJECTS_SERVICE_KEY, NEBOS_SERVICE_TOKEN,
+# BILLING_SERVICE_ACCOUNT_KEY) is exchanged at POST /auth/service-token for a short-lived bearer.
+# The backend base is the NEBOS_BACKEND_URL secret when set, else https://api.nebbos.ai.
+
+name: sync-automations-manifest (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      manifest_path:
+        description: Repo-relative path of the manifest.
+        type: string
+        default: .nebbos/automations.yaml
+      repo_name:
+        description: Override for the repository name the manifest must declare. Empty = this repository. Used by the smoke test only.
+        type: string
+        default: ""
+    secrets:
+      NEBOS_SERVICE_KEY:
+        required: false
+      NEBOS_PROJECTS_SERVICE_KEY:
+        required: false
+      NEBOS_SERVICE_TOKEN:
+        required: false
+      BILLING_SERVICE_ACCOUNT_KEY:
+        required: false
+      NEBOS_BACKEND_URL:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: validate and sync automations manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the calling repo
+        uses: actions/checkout@v4
+        with:
+          path: consumer
+          persist-credentials: false
+      - name: "Fetch the validator at this workflow's own commit"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .automation-tools
+          persist-credentials: false
+      - name: Install validator dependencies
+        run: python3 -m pip install --quiet pyyaml jsonschema
+      - name: Validate manifest
+        env:
+          MANIFEST: consumer/${{ inputs.manifest_path }}
+          REPO_NAME: ${{ inputs.repo_name || github.event.repository.name }}
+        run: |
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::${MANIFEST#consumer/} not found"; exit 1
+          fi
+          MANIFEST_JSON_OUT="$RUNNER_TEMP/automations.json" python3 .automation-tools/scripts/validate_automations_manifest.py \
+            "$MANIFEST" .automation-tools/schemas/automations-manifest.schema.json "$REPO_NAME" consumer
+      - name: Sync manifest into the registry (main only, fail-soft)
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        env:
+          MANIFEST_JSON: ${{ runner.temp }}/automations.json
+          REPO_NAME: ${{ github.event.repository.name }}
+          NEBOS_BACKEND_URL: ${{ secrets.NEBOS_BACKEND_URL }}
+          K1: ${{ secrets.NEBOS_SERVICE_KEY }}
+          K2: ${{ secrets.NEBOS_PROJECTS_SERVICE_KEY }}
+          K3: ${{ secrets.NEBOS_SERVICE_TOKEN }}
+          K4: ${{ secrets.BILLING_SERVICE_ACCOUNT_KEY }}
+        run: python3 .automation-tools/scripts/sync_automations_manifest.py
