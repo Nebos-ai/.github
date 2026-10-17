@@ -276,6 +276,19 @@ jobs:
                   desc = (streak + "\n\nFiled by the main-red-alarm workflow (Nebos-ai/.github). "
                           "It closes this task when the workflow's newest run on main is green. "
                           "Fix the cause; do not mute the alarm.")
+                  # NEB2-1036: canonical grounding block so the tracker's task-grounding
+                  # rule (strict mode) accepts this filing.
+                  desc += ("\n\n---\n"
+                           f"**grounded_in_feedback**: {run['html_url']}\n"
+                           "**justification**: The main-red-alarm workflow files this task because a "
+                           "workflow on the main branch failed twice in a row, or failed for the first time "
+                           "where first-failure alarms apply. A red main blocks every merge queue and hides "
+                           "later regressions, so the failure is filed immediately as a tracked bug with the "
+                           "failing run attached. It is not deferred because the alarm is the only automatic "
+                           "signal that main is red, and it closes itself once the workflow is green again.\n"
+                           "**verification**: The newest run of this workflow on main concludes success; the "
+                           "alarm then closes this task itself.\n"
+                           f"**source_ref**: main-red-alarm-{REPO_NAME}-{wf['id']}")
                   st, body = tracker("POST", "/api/v1/tasks", {
                       "title": title, "description": desc, "project_id": BUGS_PROJECT,
                       "department_id": ENG_DEPT, "status": "ready", "source": "ci-failure-emitter",
