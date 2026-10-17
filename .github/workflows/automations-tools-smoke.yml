@@ -28,6 +28,8 @@ jobs:
       - run: python3 -m pip install --quiet pyyaml jsonschema
       - name: Valid fixture passes
         run: python3 scripts/validate_automations_manifest.py tests/fixtures/automations-valid.yaml schemas/automations-manifest.schema.json nebos-example .
+      - name: Hyphenated repo name passes (agent-gateway.<name>)
+        run: python3 scripts/validate_automations_manifest.py tests/fixtures/automations-valid-hyphenated-repo.yaml schemas/automations-manifest.schema.json nebos-agent-gateway .
       - name: Invalid fixture fails
         run: |
           if python3 scripts/validate_automations_manifest.py tests/fixtures/automations-invalid.yaml schemas/automations-manifest.schema.json nebos-example . ; then

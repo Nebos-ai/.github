@@ -1,0 +1,15 @@
+version: 1
+repo: nebos-agent-gateway
+automations:
+  - slug: agent-gateway.usage-dlq-drain
+    name: Usage DLQ drain
+    description: Drains the usage dead-letter queue
+    runner: in_process
+    triggers: [schedule]
+    schedule: "* * * * *"
+    expected_interval_minutes: 5
+    run_now: {kind: none, target: null}
+    risk_tier: 1
+    scope: system
+    owner_team: engineering
+    source_path: .github/workflows/close-on-merge.yml
