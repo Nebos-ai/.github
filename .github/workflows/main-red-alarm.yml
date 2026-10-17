@@ -15,6 +15,14 @@
 #          production is not serving main, e.g. a post-deploy live check. Manual runs never
 #          open it, so a deliberate dry run that fails stays quiet. Closing is unchanged.
 #
+#   QUIET  a workflow with no counted run inside the recency window (input window_days, default
+#          7) is neither red nor green: it has not run lately, so an old pair of failures says
+#          nothing about main today. Only runs CREATED within the window count toward RED and
+#          GREEN. A quiet workflow's open alarm is closed with a comment naming its newest
+#          counted run and that run's age, so a retired or re-triggered workflow cannot hold an
+#          alarm open forever. (Cancelling the alarm task instead would re-open a duplicate on
+#          the next sweep, because find_task skips done and cancelled tasks.)
+#
 # Cancelled / skipped / neutral runs are ignored. pull_request and merge_group runs are not on
 # main and are never read. This workflow's own runs are skipped so it cannot alarm on itself.
 #
@@ -47,6 +55,10 @@ on:
         description: "Log what would be opened or closed; write nothing."
         type: boolean
         default: false
+      window_days:
+        description: "Only runs created within this many days count toward RED/GREEN. A workflow with no counted run inside the window is quiet and its open alarm is closed."
+        type: number
+        default: 7
       first_failure_workflows:
         description: "Comma-separated workflow names or file names that alarm on their first failed push/schedule run on main instead of the second. Empty = none."
         type: string
@@ -74,6 +86,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
       FIRST_FAILURE: ${{ inputs.first_failure_workflows }}
+      WINDOW_DAYS: ${{ inputs.window_days }}
       K1: ${{ secrets.NEBOS_PROJECTS_SERVICE_KEY }}
       K2: ${{ secrets.NEBOS_SERVICE_KEY }}
       K3: ${{ secrets.NEBOS_SERVICE_TOKEN }}
@@ -94,6 +107,15 @@ jobs:
           LABEL = "main-red"
           BAD = {"failure", "timed_out", "startup_failure"}
           COUNTED = BAD | {"success"}
+          WINDOW = datetime.timedelta(days=float(os.environ.get("WINDOW_DAYS") or 7))
+          NOW = datetime.datetime.now(datetime.timezone.utc)
+
+          def run_time(r):
+              return datetime.datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+
+          def age_text(r):
+              secs = int((NOW - run_time(r)).total_seconds())
+              return f"{secs // 86400} days {secs % 86400 // 3600} hours old"
           FIRST = {s.strip() for s in os.environ.get("FIRST_FAILURE", "").split(",") if s.strip()}
           print(f"first-failure workflows: {', '.join(sorted(FIRST)) or 'none'}")
 
@@ -165,6 +187,10 @@ jobs:
                     and r.get("conclusion") in COUNTED]
               if not rs:
                   continue
+              if NOW - run_time(rs[0]) > WINDOW:
+                  verdicts.append(("quiet", wf, rs[0]))
+                  continue
+              rs = [r for r in rs if NOW - run_time(r) <= WINDOW]
               newest = rs[0]
               auto = [r for r in rs if r["event"] in ("push", "schedule")]
               if newest["conclusion"] == "success":
@@ -175,7 +201,7 @@ jobs:
                   verdicts.append(("red", wf, auto[0]))
 
           reds = [v for v in verdicts if v[0] == "red"]
-          print(f"workflows judged: {len(verdicts)} ({len(reds)} red)")
+          print(f"workflows judged: {len(verdicts)} ({len(reds)} red, {len([v for v in verdicts if v[0] == 'quiet'])} quiet)")
 
           # ---- alarm stores -----------------------------------------------------------
           def title_for(wf):
@@ -269,33 +295,38 @@ jobs:
                   print(f"::error::could not open an alarm for {title} (HTTP {st}): {str(body)[:300]}")
                   failed = True
 
-          def close_if_open(wf, run):
+          def close_if_open(wf, run, kind="green"):
               global failed
               title = title_for(wf)
               task = find_task(title)
               issue = find_issue(title)
               if not (task or issue):
                   return
-              note = f"Green again on main: {run_line(run)}. Closing this alarm."
+              if kind == "quiet":
+                  note = (f"Quiet on main: no counted run in the last {WINDOW.days} days. Newest counted run is "
+                          f"{age_text(run)}: {run_line(run)}. Closing this alarm; it re-opens if the workflow fails "
+                          f"twice again inside the window.")
+              else:
+                  note = f"Green again on main: {run_line(run)}. Closing this alarm."
               if DRY:
-                  print(f"[dry-run] GREEN {title}: would close")
+                  print(f"[dry-run] {kind.upper()} {title}: would close")
                   return
               if task:
                   tracker("POST", f"/api/v1/tasks/{task['id']}/comments", {"body": note})
                   st, body = tracker("POST", f"/api/v1/tasks/{task['id']}/transition", {"to_status": "done"})
-                  print(f"GREEN {title}: task {task.get('short_id') or task['id']} -> done (HTTP {st})")
+                  print(f"{kind.upper()} {title}: task {task.get('short_id') or task['id']} -> done (HTTP {st})")
                   if st >= 300:
                       print(f"::warning::could not close task: {str(body)[:300]}")
                       failed = True
               if issue:
                   gh("POST", f"/issues/{issue['number']}/comments", {"body": note})
                   st, _ = gh("PATCH", f"/issues/{issue['number']}", {"state": "closed", "state_reason": "completed"})
-                  print(f"GREEN {title}: issue #{issue['number']} closed (HTTP {st})")
+                  print(f"{kind.upper()} {title}: issue #{issue['number']} closed (HTTP {st})")
 
           for kind, wf, run in verdicts:
               if kind == "red":
                   open_or_update(wf, run)
               else:
-                  close_if_open(wf, run)
+                  close_if_open(wf, run, kind)
           sys.exit(1 if failed else 0)
           PY
