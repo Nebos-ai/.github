@@ -10,6 +10,10 @@
 #             Later red runs add a comment to the same alarm, never a second alarm.
 #   GREEN  that workflow's newest run on main (push, schedule or manual) succeeded
 #          -> the alarm is closed with a comment naming the green run.
+#   FIRST  a workflow the caller lists in first_failure_workflows is RED on its newest failed
+#          push/schedule run (one failure, not two). For checks where one failure already means
+#          production is not serving main, e.g. a post-deploy live check. Manual runs never
+#          open it, so a deliberate dry run that fails stays quiet. Closing is unchanged.
 #
 # Cancelled / skipped / neutral runs are ignored. pull_request and merge_group runs are not on
 # main and are never read. This workflow's own runs are skipped so it cannot alarm on itself.
@@ -26,6 +30,9 @@
 #     alarm:
 #       uses: Nebos-ai/.github/.github/workflows/main-red-alarm.yml@main
 #       secrets: inherit
+#       # optional: alarm on the FIRST failed push run of these workflows (names or file names)
+#       with:
+#         first_failure_workflows: "verify-deploy-web"
 #
 # Tracker auth reuses the pattern of scripts/ci/create_bug_task.py and close-on-merge: the first
 # service key found among NEBOS_PROJECTS_SERVICE_KEY, NEBOS_SERVICE_KEY, NEBOS_SERVICE_TOKEN is
@@ -40,6 +47,10 @@ on:
         description: "Log what would be opened or closed; write nothing."
         type: boolean
         default: false
+      first_failure_workflows:
+        description: "Comma-separated workflow names or file names that alarm on their first failed push/schedule run on main instead of the second. Empty = none."
+        type: string
+        default: ""
     secrets:
       NEBOS_PROJECTS_SERVICE_KEY:
         required: false
@@ -62,6 +73,7 @@ jobs:
       REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
       DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+      FIRST_FAILURE: ${{ inputs.first_failure_workflows }}
       K1: ${{ secrets.NEBOS_PROJECTS_SERVICE_KEY }}
       K2: ${{ secrets.NEBOS_SERVICE_KEY }}
       K3: ${{ secrets.NEBOS_SERVICE_TOKEN }}
@@ -82,6 +94,13 @@ jobs:
           LABEL = "main-red"
           BAD = {"failure", "timed_out", "startup_failure"}
           COUNTED = BAD | {"success"}
+          FIRST = {s.strip() for s in os.environ.get("FIRST_FAILURE", "").split(",") if s.strip()}
+          print(f"first-failure workflows: {', '.join(sorted(FIRST)) or 'none'}")
+
+          def first_failure(wf):
+              base = os.path.basename(wf.get("path", ""))
+              return bool(FIRST) and (wf.get("name") in FIRST or base in FIRST
+                                      or os.path.splitext(base)[0] in FIRST)
 
           def call(method, url, body=None, token=None, accept="application/json"):
               data = json.dumps(body).encode() if body is not None else None
@@ -150,6 +169,8 @@ jobs:
               auto = [r for r in rs if r["event"] in ("push", "schedule")]
               if newest["conclusion"] == "success":
                   verdicts.append(("green", wf, newest))
+              elif first_failure(wf) and auto and auto[0]["conclusion"] in BAD:
+                  verdicts.append(("red", wf, auto[0]))
               elif len(auto) >= 2 and auto[0]["conclusion"] in BAD and auto[1]["conclusion"] in BAD:
                   verdicts.append(("red", wf, auto[0]))
 
@@ -205,7 +226,8 @@ jobs:
           def open_or_update(wf, run):
               global failed
               title = title_for(wf)
-              streak = (f"The workflow `{wf['name']}` ({wf['path']}) failed on main twice in a row. "
+              how = "(first failure alarms for this workflow)" if first_failure(wf) else "twice in a row"
+              streak = (f"The workflow `{wf['name']}` ({wf['path']}) failed on main {how}. "
                         f"Latest: {run_line(run)}.")
               task = find_task(title)
               issue = find_issue(title)
