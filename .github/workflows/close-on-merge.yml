@@ -35,7 +35,7 @@
 #     commit, so the script that runs is the one at the commit the caller pinned.
 #
 # Secrets (read from the caller, never stored here): NEBOS_SERVICE_KEY, or NEBOS_SERVICE_TOKEN
-# for nebos-projects; NEBOS_API_BASE when the repo has it as a secret.
+# for nebos-projects. The API base is the api_base input, else the NEBOS_API_BASE secret.
 
 name: close-on-merge (reusable)
 
@@ -43,7 +43,7 @@ on:
   workflow_call:
     inputs:
       api_base:
-        description: Tracker API base URL, used when the NEBOS_API_BASE secret is not set.
+        description: Tracker API base URL. When empty, the NEBOS_API_BASE secret is used.
         type: string
         required: false
         default: ""
@@ -68,7 +68,7 @@ jobs:
       - name: Move the tasks named on explicit Task:/Refs: lines
         env:
           NEBOS_SERVICE_KEY: ${{ secrets.NEBOS_SERVICE_KEY || secrets.NEBOS_SERVICE_TOKEN }}
-          NEBOS_API_BASE: ${{ secrets.NEBOS_API_BASE || inputs.api_base }}
+          NEBOS_API_BASE: ${{ inputs.api_base || secrets.NEBOS_API_BASE }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
