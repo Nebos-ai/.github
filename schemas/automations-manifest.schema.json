@@ -20,7 +20,7 @@
       "additionalProperties": false,
       "required": ["slug", "name", "description", "runner", "triggers", "schedule", "expected_interval_minutes", "run_now", "risk_tier", "scope", "owner_team", "source_path"],
       "properties": {
-        "slug": {"type": "string", "pattern": "^[a-z0-9]+\\.[a-z0-9]+(-[a-z0-9]+)*$", "description": "<repo-short>.<kebab-name>; repo-short is the repo name minus a nebos-/nebbos- prefix."},
+        "slug": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*\\.[a-z0-9]+(-[a-z0-9]+)*$", "description": "<repo-short>.<kebab-name>; repo-short is the repo name minus a nebos-/nebbos- prefix."},
         "name": {"type": "string", "minLength": 1},
         "description": {"type": "string", "minLength": 1},
         "runner": {"$ref": "#/$defs/runner"},
