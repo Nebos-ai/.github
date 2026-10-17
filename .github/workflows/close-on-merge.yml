@@ -58,14 +58,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Fetch the script at this workflow's own commit
+      - name: "Fetch the script at this workflow's own commit"
         uses: actions/checkout@v4
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .close-on-merge
           persist-credentials: false
-      - name: Move the tasks named on explicit Task:/Refs: lines
+      - name: "Move the tasks named on explicit Task:/Refs: lines"
         env:
           NEBOS_SERVICE_KEY: ${{ secrets.NEBOS_SERVICE_KEY || secrets.NEBOS_SERVICE_TOKEN }}
           NEBOS_API_BASE: ${{ inputs.api_base || secrets.NEBOS_API_BASE }}
