@@ -15,6 +15,12 @@
 #          production is not serving main, e.g. a post-deploy live check. Manual runs never
 #          open it, so a deliberate dry run that fails stays quiet. Closing is unchanged.
 #
+#   BRANCH a workflow the caller lists in workflow_branches (name=branch) is judged on that
+#          branch's runs instead of main's, with the same RED / GREEN / FIRST / QUIET rules. For
+#          a check that runs on another branch, e.g. a production live check that runs on pushes
+#          to `production` once production deploys from `production` (PHTW-58). Alarm titles do
+#          not change, so an alarm already open for that workflow is still found and closed.
+#
 #   QUIET  a workflow with no counted run inside the recency window (input window_days, default
 #          7) is neither red nor green: it has not run lately, so an old pair of failures says
 #          nothing about main today. Only runs CREATED within the window count toward RED and
@@ -39,8 +45,10 @@
 #       uses: Nebos-ai/.github/.github/workflows/main-red-alarm.yml@main
 #       secrets: inherit
 #       # optional: alarm on the FIRST failed push run of these workflows (names or file names)
+#       # optional: judge these workflows on another branch's runs (name=branch, comma-separated)
 #       with:
 #         first_failure_workflows: "verify-deploy-web"
+#         workflow_branches: "verify-deploy-web=production"
 #
 # Tracker auth reuses the pattern of scripts/ci/create_bug_task.py and close-on-merge: the first
 # service key found among NEBOS_PROJECTS_SERVICE_KEY, NEBOS_SERVICE_KEY, NEBOS_SERVICE_TOKEN is
@@ -61,6 +69,10 @@ on:
         default: 7
       first_failure_workflows:
         description: "Comma-separated workflow names or file names that alarm on their first failed push/schedule run on main instead of the second. Empty = none."
+        type: string
+        default: ""
+      workflow_branches:
+        description: "Comma-separated name=branch pairs (workflow name, file name or file stem): judge that workflow on the branch's runs instead of main's, e.g. verify-deploy-web=production. Empty = every workflow is judged on main."
         type: string
         default: ""
     secrets:
@@ -86,6 +98,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
       FIRST_FAILURE: ${{ inputs.first_failure_workflows }}
+      WORKFLOW_BRANCHES: ${{ inputs.workflow_branches }}
       WINDOW_DAYS: ${{ inputs.window_days }}
       K1: ${{ secrets.NEBOS_PROJECTS_SERVICE_KEY }}
       K2: ${{ secrets.NEBOS_SERVICE_KEY }}
@@ -123,6 +136,20 @@ jobs:
               base = os.path.basename(wf.get("path", ""))
               return bool(FIRST) and (wf.get("name") in FIRST or base in FIRST
                                       or os.path.splitext(base)[0] in FIRST)
+
+          BRANCHES = {}
+          for pair in os.environ.get("WORKFLOW_BRANCHES", "").split(","):
+              name, sep, branch = pair.partition("=")
+              if sep and name.strip() and branch.strip():
+                  BRANCHES[name.strip()] = branch.strip()
+          print(f"workflow branches: {', '.join(f'{k}={v}' for k, v in sorted(BRANCHES.items())) or 'none (all main)'}")
+
+          def branch_for(wf):
+              base = os.path.basename(wf.get("path", ""))
+              for key in (wf.get("name"), base, os.path.splitext(base)[0]):
+                  if key in BRANCHES:
+                      return BRANCHES[key]
+              return "main"
 
           def call(method, url, body=None, token=None, accept="application/json"):
               data = json.dumps(body).encode() if body is not None else None
@@ -178,7 +205,8 @@ jobs:
           for wf in wfs.get("workflows", []):
               if wf.get("state") != "active" or "main-red-alarm" in wf.get("path", ""):
                   continue
-              st, runs = gh("GET", f"/actions/workflows/{wf['id']}/runs?branch=main&status=completed&per_page=20")
+              q = urllib.parse.urlencode({"branch": branch_for(wf), "status": "completed", "per_page": 20})
+              st, runs = gh("GET", f"/actions/workflows/{wf['id']}/runs?{q}")
               if st != 200:
                   print(f"::warning::cannot read runs of {wf['name']} (HTTP {st})")
                   continue
@@ -252,8 +280,9 @@ jobs:
           def open_or_update(wf, run):
               global failed
               title = title_for(wf)
+              br = branch_for(wf)
               how = "(first failure alarms for this workflow)" if first_failure(wf) else "twice in a row"
-              streak = (f"The workflow `{wf['name']}` ({wf['path']}) failed on main {how}. "
+              streak = (f"The workflow `{wf['name']}` ({wf['path']}) failed on {br} {how}. "
                         f"Latest: {run_line(run)}.")
               task = find_task(title)
               issue = find_issue(title)
@@ -262,31 +291,31 @@ jobs:
                   return
               if task:
                   if not task_has(task["id"], str(run["id"])):
-                      tracker("POST", f"/api/v1/tasks/{task['id']}/comments", {"body": f"Still red on main. {run_line(run)}"})
+                      tracker("POST", f"/api/v1/tasks/{task['id']}/comments", {"body": f"Still red on {br}. {run_line(run)}"})
                   print(f"RED {title}: updated task {task.get('short_id') or task['id']}")
                   return
               if issue:
                   st, cm = gh("GET", f"/issues/{issue['number']}/comments?per_page=100")
                   if str(run["id"]) not in json.dumps(cm):
-                      gh("POST", f"/issues/{issue['number']}/comments", {"body": f"Still red on main. {run_line(run)}"})
+                      gh("POST", f"/issues/{issue['number']}/comments", {"body": f"Still red on {br}. {run_line(run)}"})
                   print(f"RED {title}: updated issue #{issue['number']}")
                   return
               if tracker_token:
                   today = datetime.datetime.now(datetime.timezone.utc).date()
                   desc = (streak + "\n\nFiled by the main-red-alarm workflow (Nebos-ai/.github). "
-                          "It closes this task when the workflow's newest run on main is green. "
+                          f"It closes this task when the workflow's newest run on {br} is green. "
                           "Fix the cause; do not mute the alarm.")
                   # NEB2-1036: canonical grounding block so the tracker's task-grounding
                   # rule (strict mode) accepts this filing.
                   desc += ("\n\n---\n"
                            f"**grounded_in_feedback**: {run['html_url']}\n"
                            "**justification**: The main-red-alarm workflow files this task because a "
-                           "workflow on the main branch failed twice in a row, or failed for the first time "
+                           f"workflow on the {br} branch failed twice in a row, or failed for the first time "
                            "where first-failure alarms apply. A red main blocks every merge queue and hides "
                            "later regressions, so the failure is filed immediately as a tracked bug with the "
                            "failing run attached. It is not deferred because the alarm is the only automatic "
                            "signal that main is red, and it closes itself once the workflow is green again.\n"
-                           "**verification**: The newest run of this workflow on main concludes success; the "
+                           f"**verification**: The newest run of this workflow on {br} concludes success; the "
                            "alarm then closes this task itself.\n"
                            f"**source_ref**: main-red-alarm-{REPO_NAME}-{wf['id']}")
                   st, body = tracker("POST", "/api/v1/tasks", {
@@ -301,7 +330,7 @@ jobs:
                   print(f"::warning::tracker task create failed (HTTP {st}): {str(body)[:300]}; falling back to a GitHub issue")
               gh("POST", "/labels", {"name": LABEL, "color": "B60205", "description": "A workflow keeps failing on main"})
               st, body = gh("POST", "/issues", {"title": title, "labels": [LABEL],
-                            "body": streak + "\n\nFiled by the main-red-alarm workflow. It closes this issue when the workflow's newest run on main is green."})
+                            "body": streak + f"\n\nFiled by the main-red-alarm workflow. It closes this issue when the workflow's newest run on {br} is green."})
               if st in (200, 201):
                   print(f"RED {title}: opened issue #{body['number']}")
               else:
@@ -315,12 +344,13 @@ jobs:
               issue = find_issue(title)
               if not (task or issue):
                   return
+              br = branch_for(wf)
               if kind == "quiet":
-                  note = (f"Quiet on main: no counted run in the last {WINDOW.days} days. Newest counted run is "
+                  note = (f"Quiet on {br}: no counted run in the last {WINDOW.days} days. Newest counted run is "
                           f"{age_text(run)}: {run_line(run)}. Closing this alarm; it re-opens if the workflow fails "
                           f"twice again inside the window.")
               else:
-                  note = f"Green again on main: {run_line(run)}. Closing this alarm."
+                  note = f"Green again on {br}: {run_line(run)}. Closing this alarm."
               if DRY:
                   print(f"[dry-run] {kind.upper()} {title}: would close")
                   return
