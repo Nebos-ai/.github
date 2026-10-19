@@ -37,7 +37,7 @@
 #   K2  NEBOS_PROJECTS_SERVICE_KEY     tracker key; same
 #   K3  NEBOS_SERVICE_TOKEN            tracker key; same
 #   K4  BILLING_SERVICE_ACCOUNT_KEY    billing backend key; rows land in ITS tenant, not the operator's
-# After the exchange the tenant id is read from the token's JWT claims and logged (never the key or
+# After the exchange the tenant id is read from the token's JWT org_id claim and logged (never the key or
 # token). Set the expected_tenant_id input (operator tenant 00000000-0000-4000-8000-000000000010) and
 # the run fails red, before any write, if the token is for a different tenant.
 # The backend base is the NEBOS_BACKEND_URL secret when set, else https://api.nebbos.ai.

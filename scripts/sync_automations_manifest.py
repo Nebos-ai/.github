@@ -38,7 +38,8 @@ SLOTS: list[tuple[str, str]] = [
     ("K3", "NEBOS_SERVICE_TOKEN"),
     ("K4", "BILLING_SERVICE_ACCOUNT_KEY"),
 ]
-TENANT_CLAIMS = ("tenant_id", "tid", "tenant")
+# org_id is what create_service_jwt writes (nebos-backend api/service_token.py). "tid" is NOT a tenant claim here.
+TENANT_CLAIMS = ("org_id", "tenant_id", "tenant")
 
 
 def jwt_tenant(token: str) -> str | None:

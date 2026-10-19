@@ -109,7 +109,7 @@ Registration at creation and a run record for every run, for the Nebbos automati
   then `NEBOS_SERVICE_KEY`, `NEBOS_PROJECTS_SERVICE_KEY`, `NEBOS_SERVICE_TOKEN` (tracker keys, the backend
   answers 401) and `BILLING_SERVICE_ACCOUNT_KEY` (rows land in that account's tenant). If no slot exchanges the
   run **fails red** with an `::error::` naming AUT-70 and each slot's HTTP status. The log line
-  `registry auth: token from slot ... is for tenant ...` shows the tenant from the token's claims; pass the
+  `registry auth: token from slot ... is for tenant ...` shows the tenant from the token's `org_id` claim; pass the
   optional `expected_tenant_id` input to fail red when it differs. `secrets: inherit` passes the new secret.
   Tests: `tests/test_sync_automations_manifest.py`.
 - **Run record.** Append to a scheduled job as the last step:

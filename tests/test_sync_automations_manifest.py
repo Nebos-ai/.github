@@ -30,7 +30,8 @@ def make_jwt(claims: dict) -> str:
 class FakeBackend:
     """key value -> (status, tenant). Records exchange order and PUT calls."""
 
-    def __init__(self, keys: dict[str, tuple[int, str | None]], put_status: int = 200) -> None:
+    def __init__(self, keys: dict[str, tuple[int, str | None]], put_status: int = 200, claim: str = "tenant_id") -> None:
+        self.claim = claim
         self.keys = keys
         self.put_status = put_status
         self.exchanged: list[str] = []
@@ -43,7 +44,7 @@ class FakeBackend:
             status, tenant = self.keys.get(key, (401, None))
             if status != 200:
                 return status, {"detail": "no"}
-            claims = {"sub": "sa"} if tenant is None else {"sub": "sa", "tenant_id": tenant}
+            claims = {"sub": "sa"} if tenant is None else {"sub": "sa", self.claim: tenant}
             return 200, {"data": {"access_token": make_jwt(claims)}}
         self.puts += 1
         return self.put_status, {}
@@ -115,6 +116,19 @@ class ExpectedTenant(unittest.TestCase):
         self.assertEqual(sync.jwt_tenant(make_jwt({"tenant_id": OP})), OP)
         self.assertIsNone(sync.jwt_tenant("not-a-jwt"))
         self.assertIsNone(sync.jwt_tenant(make_jwt({"sub": "x"})))
+
+    def test_real_backend_claim_shape_org_id(self) -> None:
+        claims = {"sub": "service:abc", "org_id": OP, "name": "sync", "scopes": ["automations:write"],
+                  "token_use": "service", "iss": "nebos", "aud": "nebos", "iat": 1, "exp": 2, "jti": "j"}
+        self.assertEqual(sync.jwt_tenant(make_jwt(claims)), OP)
+        # tid is a token id in this codebase, never a tenant
+        self.assertIsNone(sync.jwt_tenant(make_jwt({"tid": OP})))
+
+    def test_org_id_token_logs_tenant_and_passes_expected(self) -> None:
+        be = FakeBackend({"kb": (200, OP)}, claim="org_id")
+        code, out = run_main(be, {"KB": "kb", "EXPECTED_TENANT_ID": OP})
+        self.assertEqual(code, 0)
+        self.assertIn(f"is for tenant {OP}", out)
 
     def test_mismatch_fails_before_any_write(self) -> None:
         be = FakeBackend({"k4": (200, OTHER)})
