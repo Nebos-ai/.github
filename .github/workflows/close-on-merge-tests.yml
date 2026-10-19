@@ -5,12 +5,14 @@ on:
   pull_request:
     paths:
       - scripts/close_on_merge.py
+      - scripts/sync_automations_manifest.py
       - tests/**
       - .github/workflows/close-on-merge*.yml
   push:
     branches: [main]
     paths:
       - scripts/close_on_merge.py
+      - scripts/sync_automations_manifest.py
       - tests/**
       - .github/workflows/close-on-merge*.yml
 

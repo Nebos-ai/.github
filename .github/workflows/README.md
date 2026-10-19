@@ -104,6 +104,14 @@ Registration at creation and a run record for every run, for the Nebbos automati
   A thin caller workflow runs `sync-automations-manifest.yml` on pull requests (validate only) and on pushes
   to main that change the file (validate, then `PUT /api/v1/automations/manifests/{repo}`). Caller template
   is in the header of the workflow file.
+- **Key slots (AUT-70).** The sync exchanges the first slot that works at `POST /auth/service-token`:
+  `NEBOS_BACKEND_SERVICE_KEY` (a backend key for the operator tenant `00000000-0000-4000-8000-000000000010`),
+  then `NEBOS_SERVICE_KEY`, `NEBOS_PROJECTS_SERVICE_KEY`, `NEBOS_SERVICE_TOKEN` (tracker keys, the backend
+  answers 401) and `BILLING_SERVICE_ACCOUNT_KEY` (rows land in that account's tenant). If no slot exchanges the
+  run **fails red** with an `::error::` naming AUT-70 and each slot's HTTP status. The log line
+  `registry auth: token from slot ... is for tenant ...` shows the tenant from the token's claims; pass the
+  optional `expected_tenant_id` input to fail red when it differs. `secrets: inherit` passes the new secret.
+  Tests: `tests/test_sync_automations_manifest.py`.
 - **Run record.** Append to a scheduled job as the last step:
 
   ```yaml
@@ -118,4 +126,6 @@ Registration at creation and a run record for every run, for the Nebbos automati
 
   The job needs `actions: read` for an exact duration. The step never fails the calling job.
 - Both authenticate with a repo service key exchanged at `POST /auth/service-token`, the same pattern as
-  `main-red-alarm` and the billing job workflows, and both warn and pass while the registry endpoint is not deployed.
+  `main-red-alarm` and the billing job workflows. Both warn and pass while the registry endpoint is not
+  deployed. `report-automation-run` also still warns and passes when no key works (it must never fail the job it
+  reports on); it is not changed by AUT-70.
