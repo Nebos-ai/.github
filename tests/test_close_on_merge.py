@@ -1,4 +1,4 @@
-"""Fixtures for scripts/close_on_merge.py (NPTE-181). Standard library only."""
+"""Fixtures for scripts/close_on_merge.py (NPTE-181, INFR-413). Standard library only."""
 
 from __future__ import annotations
 
@@ -21,7 +21,11 @@ BASE = "https://tracker.example"
 
 
 class FakeTracker:
-    """Records every call; answers from a table of per-task behaviours."""
+    """Records every call; answers from a table of per-task behaviours.
+
+    Tasks are keyed by the ref the script sends (a UUID or a short id); a short-id
+    entry answers GET with its ``id`` like the real tracker's dual addressing.
+    """
 
     def __init__(self, tasks: dict[str, dict[str, Any]] | None = None, exchange: int = 200) -> None:
         self.tasks = tasks or {}
@@ -44,6 +48,7 @@ class FakeTracker:
             if code != 200:
                 return code, {"detail": "missing"}
             return 200, {
+                "id": task.get("id", tid),
                 "status": task.get("status", "todo"),
                 "plain_summary": task.get("summary", ""),
             }
@@ -119,7 +124,7 @@ class ParserTests(unittest.TestCase):
     def test_uuid_case_folded_and_deduped(self) -> None:
         self.assertEqual(com.extract_refs(f"Task: {A.upper()}", f"Task: {A}"), ([A], []))
 
-    def test_short_ids_collected_not_resolved(self) -> None:
+    def test_short_ids_collected(self) -> None:
         self.assertEqual(com.extract_refs("t", "Task: MTCE-28\nRefs: PTR-1, PTR-2"), ([], ["MTCE-28", "PTR-1", "PTR-2"]))
 
     def test_title_line_counts(self) -> None:
@@ -225,12 +230,59 @@ class RunTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("::error::", out)
 
-    def test_short_id_only_logs_notice_and_makes_no_calls(self) -> None:
+    # Short ids (INFR-413): resolved through the tracker, then handled like a UUID.
+
+    def test_short_id_resolves_and_closes(self) -> None:
+        t = FakeTracker({"MTCE-28": {"id": A}, A: {}})
+        rc, out = run("Task: MTCE-28", t)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t.transitions(), [(A, "done")])
+        self.assertIn("MTCE-28 resolves to task", out)
+        self.assertEqual(len(t.comments()), 1)
+
+    def test_short_id_and_its_uuid_close_the_task_once(self) -> None:
+        t = FakeTracker({"MTCE-28": {"id": A}, A: {}})
+        rc, _ = run(f"Task: {A}\nRefs: MTCE-28", t)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t.transitions(), [(A, "done")])
+
+    def test_multi_short_ids_close_each(self) -> None:
+        t = FakeTracker({"PTR-1": {"id": A}, "PTR-2": {"id": B}, A: {}, B: {}})
+        rc, _ = run("Refs: PTR-1, PTR-2", t)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t.transitions(), [(A, "done"), (B, "done")])
+
+    def test_short_id_follows_the_live_rule(self) -> None:
+        t = FakeTracker({"MTCE-28": {"id": A}, A: {"status": "todo", "summary": "**verification**: check it live"}})
+        rc, _ = run("Task: MTCE-28", t)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t.transitions(), [(A, "in_review")])
+
+    def test_unknown_short_id_is_a_warning(self) -> None:
+        t = FakeTracker({})
+        rc, out = run("Task: MTCE-28", t)
+        self.assertEqual(rc, 0)
+        self.assertIn("::warning::", out)
+        self.assertEqual(t.transitions(), [])
+
+    def test_short_id_lookup_error_fails_red(self) -> None:
+        t = FakeTracker({"MTCE-28": {"get": 500}})
+        rc, out = run("Task: MTCE-28", t)
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::", out)
+        self.assertEqual(t.transitions(), [])
+
+    def test_short_id_answer_without_uuid_fails_red(self) -> None:
+        t = FakeTracker({"MTCE-28": {"id": "not-a-uuid"}})
+        rc, _ = run("Task: MTCE-28", t)
+        self.assertEqual(rc, 1)
+        self.assertEqual(t.transitions(), [])
+
+    def test_missing_key_with_short_reference_fails(self) -> None:
         t = FakeTracker({})
         rc, out = run("Task: MTCE-28", t, key="")
-        self.assertEqual(rc, 0)
-        self.assertIn("::notice::", out)
-        self.assertIn("MTCE-28", out)
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::", out)
         self.assertEqual(t.calls, [])
 
 
