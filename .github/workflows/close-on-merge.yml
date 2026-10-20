@@ -7,7 +7,12 @@
 # Rule: only lines that start with Task:, Tasks:, Closes: or Refs: (any case) name a task.
 # Full UUIDs and short ids (PREFIX-N, for example PTR-1) on them count; a short id is resolved
 # to its task through the tracker (INFR-413). Prose, quotes, code blocks and checklist lines
-# are ignored.
+# never name a task.
+#
+# Steps: before moving a named task, the script ticks each of its open steps that a "- [x]"
+# line under the PR's Requirements heading covers (step id or the first 30 characters of the
+# title, the MCP requirements gate's rule), so a PR that delivers every step closes its task
+# (task 3d7ab1bb). "- [ ]" lines tick nothing; a refused tick fails the run.
 #
 # Caller (pin to a commit SHA, GitHub's recommended form for third-party-style reuse):
 #
