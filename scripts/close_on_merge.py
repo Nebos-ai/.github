@@ -18,6 +18,18 @@ Short ids (INFR-413) are resolved through the tracker, which answers
 they resolve to is then handled exactly like a UUID reference; a short id and its UUID on
 the same PR close the task once.
 
+Steps the PR delivers (task 3d7ab1bb)
+-------------------------------------
+Checklist lines never name a task, but they do say which of its steps the PR covers. Before
+moving a named task, the script ticks each of its OPEN steps that a ``- [x]`` line under a
+Requirements heading covers, then asks for done. The rule is the one the MCP requirements
+gate applies when the PR is opened (nebos-backend ``nebos_mcp/requirements_parse.py``): the
+section starts at a heading whose text starts with "Requirements" and runs to the next
+heading of the same or a higher level, and a line covers a step when it contains the step's
+id or the first 30 characters of its title, both lower-cased with whitespace collapsed.
+``- [ ]`` lines, lines outside that section and fenced code tick nothing. The task's comment
+lists the steps ticked. A tick the tracker refuses fails the run.
+
 Behaviour kept from the per-repo copies
 ---------------------------------------
 - The task is read first. When its **verification** text asks for a live check (after
@@ -29,7 +41,7 @@ Behaviour kept from the per-repo copies
   idempotent.
 - The run is red only when at least one reference (UUID or short id) exists and the
   service key is missing or rejected, a short id lookup gets any answer but 200 or 404,
-  or a transition fails.
+  a covered step cannot be read or ticked, or a transition fails.
 
 The script uses only the Python standard library. It holds no secret and no tenant data:
 the key and the API base come from the environment.
@@ -72,6 +84,11 @@ _LIVE_CHECK = re.compile(
     re.IGNORECASE,
 )
 
+# Requirements checklist, as nebos-backend nebos_mcp/requirements_parse.py defines it.
+_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+_CHECKLIST = re.compile(r"^\s*[-*+]\s+\[([ xX])\]\s+(.*\S)\s*$")
+_TITLE_PREFIX_CHARS = 30
+
 DONE_GATE_ERROR = "task_done_gate_open_steps"
 
 HttpFn = Callable[[str, str, "dict[str, Any] | None", "str | None"], "tuple[int, Any]"]
@@ -107,6 +124,50 @@ def extract_refs(*texts: str) -> tuple[list[str], list[str]]:
                     shorts.append(item.group("short").upper())
                 pos = item.end()
     return list(dict.fromkeys(uuids)), list(dict.fromkeys(shorts))
+
+
+def _normalize(text: str) -> str:
+    """Lower-case and collapse every whitespace run to one space."""
+    return " ".join(str(text).lower().split())
+
+
+def covered_lines(body: str) -> list[str]:
+    """The normalised text of every ``- [x]`` line in the body's Requirements section(s).
+
+    A section starts at a heading whose text starts with "Requirements" (any case, any
+    level) and runs to the next heading of the same or a higher level; deeper headings stay
+    inside it. Lines inside fenced code are skipped.
+    """
+    lines: list[str] = []
+    section_level: int | None = None
+    in_fence = False
+    for line in (body or "").splitlines():
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        heading = _HEADING.match(line)
+        if heading:
+            level = len(heading.group(1))
+            if heading.group(2).strip().lower().startswith("requirements"):
+                section_level = level
+            elif section_level is not None and level <= section_level:
+                section_level = None
+            continue
+        if section_level is None:
+            continue
+        item = _CHECKLIST.match(line)
+        if item and item.group(1).lower() == "x":
+            lines.append(_normalize(item.group(2)))
+    return lines
+
+
+def step_covered(step: Mapping[str, Any], lines: list[str]) -> bool:
+    """True when a covered line contains the step's id or its title's first 30 characters."""
+    step_id = _normalize(step.get("id") or "")
+    prefix = _normalize(step.get("title") or "")[:_TITLE_PREFIX_CHARS].strip()
+    return any((step_id and step_id in line) or (prefix and prefix in line) for line in lines)
 
 
 def http_json(
@@ -238,8 +299,50 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
         check = m.group(1).strip() if m else ""
         return task.get("status"), (check if _LIVE_CHECK.search(check) else None)
 
+    covered = covered_lines(pr_body)
+
+    def tick_covered(tid: str) -> tuple[list[str], bool]:
+        """Tick the task's open steps the PR marks [x]. Returns (ticked step lines, ok)."""
+        if not covered:
+            return [], True
+        l_status, l_body = http("GET", f"{base}/api/v1/tasks/{tid}/checklist", None, bearer)
+        if l_status == 404:
+            return [], True  # unknown task: the transition below reports it
+        items = l_body.get("items") if _ok(l_status) and isinstance(l_body, dict) else None
+        if not isinstance(items, list):
+            print(f"::warning::Could not read the steps of task {tid} (HTTP {l_status}); none ticked.")
+            return [], False
+        ticked: list[str] = []
+        ok = True
+        for step in items:
+            if not isinstance(step, dict) or step.get("is_checked") or not step_covered(step, covered):
+                continue
+            sid = str(step.get("id") or "")
+            p_status, p_body = http(
+                "PATCH", f"{base}/api/v1/tasks/{tid}/checklist/{sid}", {"is_checked": True}, bearer
+            )
+            if _ok(p_status):
+                print(f"  Ticked step {sid} of task {tid}: the PR marks it [x] under Requirements.")
+                ticked.append(f"- {step.get('title') or '(untitled)'} ({sid})")
+            else:
+                print(
+                    f"::warning::Could not tick step {sid} of task {tid} "
+                    f"(HTTP {p_status}): {str(p_body)[:200]}"
+                )
+                ok = False
+        return ticked, ok
+
     for tid in ids:
         read = read_task(tid)
+        ticked: list[str] = []
+        if read is None or read[0] != "done":
+            ticked, tick_ok = tick_covered(tid)
+            failed = failed or not tick_ok
+        note = (
+            "\n\nTicked by this merge (the PR marks them [x] under Requirements):\n" + "\n".join(ticked)
+            if ticked
+            else ""
+        )
         if read is None:
             print(f"::warning::Could not read task {tid}; closing it without the live-check rule.")
         elif read[1]:
@@ -266,7 +369,7 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
                 tid,
                 f"Merged via {pr_label}. Its verification needs a check on the running service, "
                 f"so the task {moved} in_review, not done. Move it to done once this check "
-                f"passes:\n\n{shown}",
+                f"passes:\n\n{shown}{note}",
             )
             continue
 
@@ -299,17 +402,17 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
                     for s in steps
                     if isinstance(s, dict)
                 ]
-                comment(tid, "\n".join(lines))
+                comment(tid, "\n".join(lines) + note)
                 continue
         if not _ok(t_status):
             print(f"::warning::Failed to move task {tid} to done (HTTP {t_status}).")
             failed = True
             continue
         print(f"  Task {tid} moved to done.")
-        comment(tid, f"Closed by {pr_label}.")
+        comment(tid, f"Closed by {pr_label}.{note}")
 
     if failed:
-        print("::error::One or more tasks failed to resolve or transition; see the warnings above.")
+        print("::error::One or more tasks failed to resolve, tick or transition; see the warnings above.")
         return 1
     print("Done.")
     return 0
