@@ -4,9 +4,10 @@
 # The logic is scripts/close_on_merge.py in THIS repo; the fixtures are tests/ and run in
 # close-on-merge-tests.yml. The five per-repo copies that closed any bare UUID are gone.
 #
-# Rule: only lines that start with Task:, Tasks:, Closes: or Refs: (any case) name a task, and
-# only full UUIDs on them count. Prose, quotes, code blocks and checklist lines are ignored.
-# Short ids on those lines are logged as a notice and not resolved yet.
+# Rule: only lines that start with Task:, Tasks:, Closes: or Refs: (any case) name a task.
+# Full UUIDs and short ids (PREFIX-N, for example PTR-1) on them count; a short id is resolved
+# to its task through the tracker (INFR-413). Prose, quotes, code blocks and checklist lines
+# are ignored.
 #
 # Caller (pin to a commit SHA, GitHub's recommended form for third-party-style reuse):
 #
