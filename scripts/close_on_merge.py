@@ -7,12 +7,16 @@ task's verification asks for a check on the running service).
 What counts as a reference (NPTE-181)
 -------------------------------------
 Only a line that STARTS (after optional spaces or tabs) with ``Task:``, ``Tasks:``,
-``Closes:`` or ``Refs:`` (any case), followed by a list of full task UUIDs separated by
-commas, semicolons, ``&`` or ``and``. The list ends at the first word that is not an id.
-Everything else is context and is never acted on: prose, quoted text, URLs, fenced code
-blocks, Markdown checklist lines and a UUID in the middle of a sentence. Short ids
-(for example ``Task: MTCE-28``) are out of scope for now: the script logs a notice that
-the line was seen and not resolved.
+``Closes:`` or ``Refs:`` (any case), followed by a list of full task UUIDs or short ids
+(``PREFIX-N``, for example ``MTCE-28``) separated by commas, semicolons, ``&`` or ``and``.
+The list ends at the first word that is not an id. Everything else is context and is never
+acted on: prose, quoted text, URLs, fenced code blocks, Markdown checklist lines and a UUID
+in the middle of a sentence.
+
+Short ids (INFR-413) are resolved through the tracker, which answers
+``GET /api/v1/tasks/<ref>`` for a UUID or a short id under the caller's scope. The task
+they resolve to is then handled exactly like a UUID reference; a short id and its UUID on
+the same PR close the task once.
 
 Behaviour kept from the per-repo copies
 ---------------------------------------
@@ -21,9 +25,11 @@ Behaviour kept from the per-repo copies
   comment, not to done. A task that is already done is never reopened.
 - 422 ``task_done_gate_open_steps`` (open checklist steps): comment the open steps, leave
   the task open, exit 0. Any other 422 fails the run.
-- 404: warning, continue. 409: already in that status, idempotent.
-- The run is red only when at least one UUID reference exists and the service key is
-  missing or rejected, or a transition fails.
+- 404 (unknown UUID or short id): warning, continue. 409: already in that status,
+  idempotent.
+- The run is red only when at least one reference (UUID or short id) exists and the
+  service key is missing or rejected, a short id lookup gets any answer but 200 or 404,
+  or a transition fails.
 
 The script uses only the Python standard library. It holds no secret and no tenant data:
 the key and the API base come from the environment.
@@ -140,6 +146,15 @@ def _open_steps_detail(body: Any) -> dict[str, Any] | None:
     return None
 
 
+def _task_id_from(body: Any) -> str:
+    """The task UUID in a GET /api/v1/tasks/<ref> answer (bare or under ``data``), or ''."""
+    if not isinstance(body, dict):
+        return ""
+    task = body["data"] if isinstance(body.get("data"), dict) else body
+    tid = str(task.get("id") or "").lower()
+    return tid if re.fullmatch(_UUID, tid) else ""
+
+
 def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
     key = (env.get("NEBOS_SERVICE_KEY") or "").strip()
     base = (env.get("NEBOS_API_BASE") or "").strip().rstrip("/")
@@ -150,26 +165,22 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
     repo = env.get("REPO", "")
 
     ids, shorts = extract_refs(pr_title, pr_body)
-    for sid in shorts:
+    refs = ids + shorts
+    if not refs:
         print(
-            f"::notice::Task reference {sid} on a Task:/Refs: line in PR #{pr_number} was seen "
-            "and not resolved: short ids are not handled yet (NPTE-181 follow-up)."
-        )
-    if not ids:
-        print(
-            f"No full-UUID reference on a Task:/Tasks:/Closes:/Refs: line in PR #{pr_number}; "
+            f"No task reference on a Task:/Tasks:/Closes:/Refs: line in PR #{pr_number}; "
             "nothing to close."
         )
         return 0
     print(
-        f"Acting on {len(ids)} task reference(s) from explicit lines in PR #{pr_number}: "
-        + ", ".join(ids)
+        f"Acting on {len(refs)} task reference(s) from explicit lines in PR #{pr_number}: "
+        + ", ".join(refs)
     )
 
     if not key:
         print(
             "::error::NEBOS_SERVICE_KEY is not set, so close-on-merge cannot close "
-            f"tasks {ids}. Add the repo secret, then re-run this job."
+            f"tasks {refs}. Add the repo secret, then re-run this job."
         )
         return 1
     if not base:
@@ -180,7 +191,7 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
     if status in (401, 403):
         print(
             f"::error::Service-token exchange failed (HTTP {status}): the service key is "
-            f"invalid, expired or revoked. Tasks {ids} were NOT auto-closed."
+            f"invalid, expired or revoked. Tasks {refs} were NOT auto-closed."
         )
         return 1
     if not _ok(status):
@@ -194,6 +205,21 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
 
     pr_label = f"PR #{pr_number} ([{pr_title}]({pr_url})) in {repo}"
     failed = False
+
+    # Short ids: the tracker resolves PREFIX-N to the task UUID under the caller's scope.
+    for sid in shorts:
+        s_status, s_body = http("GET", f"{base}/api/v1/tasks/{sid}", None, bearer)
+        if s_status == 404:
+            print(f"::warning::Task {sid} not found (HTTP 404); skipped (unknown short id or wrong tenant).")
+            continue
+        tid = _task_id_from(s_body) if _ok(s_status) else ""
+        if not tid:
+            print(f"::warning::Could not resolve task {sid} (HTTP {s_status}): {str(s_body)[:200]}")
+            failed = True
+            continue
+        print(f"  {sid} resolves to task {tid}.")
+        if tid not in ids:
+            ids.append(tid)
 
     def comment(tid: str, text: str) -> None:
         c_status, c_body = http("POST", f"{base}/api/v1/tasks/{tid}/comments", {"body": text}, bearer)
@@ -283,7 +309,7 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
         comment(tid, f"Closed by {pr_label}.")
 
     if failed:
-        print("::error::One or more tasks failed to transition; see the warnings above.")
+        print("::error::One or more tasks failed to resolve or transition; see the warnings above.")
         return 1
     print("Done.")
     return 0
