@@ -14,6 +14,9 @@
 # title, the MCP requirements gate's rule), so a PR that delivers every step closes its task
 # (task 3d7ab1bb). "- [ ]" lines tick nothing; a refused tick fails the run.
 #
+# Evidence: every move to done names the merged PR (and the merge commit) as the tracker's
+# done-evidence gate asks (MTCE-65/MTCE-67), from MERGE_SHA and MERGED_AT below.
+#
 # Caller (pin to a commit SHA, GitHub's recommended form for third-party-style reuse):
 #
 #   name: close-on-merge
@@ -80,4 +83,6 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
         run: python3 .close-on-merge/scripts/close_on_merge.py

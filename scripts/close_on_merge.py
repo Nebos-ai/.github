@@ -30,6 +30,16 @@ id or the first 30 characters of its title, both lower-cased with whitespace col
 ``- [ ]`` lines, lines outside that section and fenced code tick nothing. The task's comment
 lists the steps ticked. A tick the tracker refuses fails the run.
 
+Close evidence (MTCE-67)
+------------------------
+The tracker's done-evidence gate (nebos-projects ``api/lib/task_done_evidence.py``, MTCE-65)
+wants each close to name the record that shows the work landed. Every move to done sends
+``evidence``: the merged PR ``{kind: pull_request, id: owner/repo#N, state: merged,
+as_of: <merged_at>}`` and, when the event gives it, the merge commit ``{kind: commit, id:
+owner/repo@<sha>}``. Each ref is built only when its parts match the tracker's own formats,
+because the tracker refuses malformed evidence in every mode; with nothing well formed the
+move is sent without evidence, as before. Moves to in_review send none.
+
 Behaviour kept from the per-repo copies
 ---------------------------------------
 - The task is read first. When its **verification** text asks for a live check (after
@@ -46,7 +56,8 @@ Behaviour kept from the per-repo copies
 The script uses only the Python standard library. It holds no secret and no tenant data:
 the key and the API base come from the environment.
 
-Environment: NEBOS_SERVICE_KEY, NEBOS_API_BASE, PR_NUMBER, PR_TITLE, PR_BODY, PR_URL, REPO.
+Environment: NEBOS_SERVICE_KEY, NEBOS_API_BASE, PR_NUMBER, PR_TITLE, PR_BODY, PR_URL, REPO,
+and optionally MERGE_SHA and MERGED_AT (the merge commit and merge time of the PR).
 """
 
 from __future__ import annotations
@@ -58,6 +69,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from typing import Any
 
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -88,6 +100,11 @@ _LIVE_CHECK = re.compile(
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _CHECKLIST = re.compile(r"^\s*[-*+]\s+\[([ xX])\]\s+(.*\S)\s*$")
 _TITLE_PREFIX_CHARS = 30
+
+# Close evidence id parts, as nebos-projects api/lib/task_done_evidence.py checks them.
+_REPO_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_PR_NUMBER = re.compile(r"^[1-9][0-9]*$")
+_SHA = re.compile(r"^[0-9a-f]{7,40}$")
 
 DONE_GATE_ERROR = "task_done_gate_open_steps"
 
@@ -168,6 +185,37 @@ def step_covered(step: Mapping[str, Any], lines: list[str]) -> bool:
     step_id = _normalize(step.get("id") or "")
     prefix = _normalize(step.get("title") or "")[:_TITLE_PREFIX_CHARS].strip()
     return any((step_id and step_id in line) or (prefix and prefix in line) for line in lines)
+
+
+def _iso_time(value: str) -> bool:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def close_evidence(
+    repo: str, pr_number: str, merge_sha: str = "", merged_at: str = ""
+) -> list[dict[str, str]]:
+    """The done-evidence refs for this merge, or [] when repo or PR number is not well formed.
+
+    Shapes are the tracker's MTCE-65 records: the merged PR (with ``as_of`` when the merge
+    time parses as ISO-8601) and the merge commit (when the sha is 7-40 lower-case hex).
+    """
+    repo = (repo or "").strip()
+    number = (pr_number or "").strip()
+    if not _REPO_NAME.match(repo) or not _PR_NUMBER.match(number):
+        return []
+    pr: dict[str, str] = {"kind": "pull_request", "id": f"{repo}#{number}", "state": "merged"}
+    when = (merged_at or "").strip()
+    if when and _iso_time(when):
+        pr["as_of"] = when
+    refs = [pr]
+    sha = (merge_sha or "").strip().lower()
+    if _SHA.match(sha):
+        refs.append({"kind": "commit", "id": f"{repo}@{sha}"})
+    return refs
 
 
 def http_json(
@@ -300,6 +348,11 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
         return task.get("status"), (check if _LIVE_CHECK.search(check) else None)
 
     covered = covered_lines(pr_body)
+    evidence = close_evidence(repo, pr_number, env.get("MERGE_SHA", ""), env.get("MERGED_AT", ""))
+    if evidence:
+        print("Close evidence for each move to done: " + ", ".join(r["id"] for r in evidence))
+    else:
+        print(f"::warning::No well-formed close evidence from REPO={repo!r} PR_NUMBER={pr_number!r}.")
 
     def tick_covered(tid: str) -> tuple[list[str], bool]:
         """Tick the task's open steps the PR marks [x]. Returns (ticked step lines, ok)."""
@@ -374,9 +427,10 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
             continue
 
         print(f"Moving task {tid} to done.")
-        t_status, t_body = http(
-            "POST", f"{base}/api/v1/tasks/{tid}/transition", {"to_status": "done"}, bearer
-        )
+        done: dict[str, Any] = {"to_status": "done"}
+        if evidence:
+            done["evidence"] = evidence
+        t_status, t_body = http("POST", f"{base}/api/v1/tasks/{tid}/transition", done, bearer)
         print(f"  HTTP {t_status}: {str(t_body)[:200]}")
         if t_status == 409:
             print(f"  Task {tid} is already done; idempotent, skipped.")
