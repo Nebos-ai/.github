@@ -1,0 +1,35 @@
+# Tests for the repo-governance-floor signer step (ADR-PROV
+# floor-signer-trust-source-org-list). Runs actionlint on the workflows and the
+# scripted signer test (tests/test_floor_signers.sh) on every PR that touches either.
+name: test-floor-signers
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "tests/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+jobs:
+  floor-signers:
+    name: actionlint and signer-step test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color .github/workflows/repo-governance-floor.yml .github/workflows/test-floor-signers.yml
+
+      - name: Signer-step test
+        run: bash tests/test_floor_signers.sh
