@@ -97,9 +97,20 @@ class FakeTracker:
     def patched(self) -> list[tuple[str, str]]:
         return [(p.split("/")[4], p.rsplit("/", 1)[1]) for m, p, _ in self.calls if m == "PATCH"]
 
+    def done_evidence(self) -> list[Any]:
+        return [
+            d.get("evidence")
+            for m, p, d in self.calls
+            if m == "POST" and p.endswith("/transition") and d["to_status"] == "done"
+        ]
+
 
 def run(
-    body: str, tracker: FakeTracker, title: str = "A PR", key: str = "nebossvc_x"
+    body: str,
+    tracker: FakeTracker,
+    title: str = "A PR",
+    key: str = "nebossvc_x",
+    extra: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     env = {
         "NEBOS_SERVICE_KEY": key,
@@ -109,6 +120,7 @@ def run(
         "PR_BODY": body,
         "PR_URL": "https://github.com/o/r/pull/7",
         "REPO": "o/r",
+        **(extra or {}),
     }
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -443,6 +455,71 @@ class RequirementsRunTests(unittest.TestCase):
         self.assertEqual(t.patched(), [(A, S1)])
         self.assertEqual(t.transitions(), [(A, "in_review")])
         self.assertIn("Ticked by this merge", t.comments()[0])
+
+
+# Close evidence for the tracker's done-evidence gate (MTCE-67).
+
+
+class EvidenceTests(unittest.TestCase):
+    def test_done_sends_merged_pr_and_merge_commit(self) -> None:
+        t = FakeTracker({A: {}})
+        extra = {"MERGE_SHA": "ABCDEF1234567", "MERGED_AT": "2026-10-24T13:00:00Z"}
+        rc, out = run(f"Task: {A}", t, extra=extra)
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            t.done_evidence(),
+            [
+                [
+                    {"kind": "pull_request", "id": "o/r#7", "state": "merged", "as_of": "2026-10-24T13:00:00Z"},
+                    {"kind": "commit", "id": "o/r@abcdef1234567"},
+                ]
+            ],
+        )
+        self.assertIn("Close evidence for each move to done: o/r#7, o/r@abcdef1234567", out)
+
+    def test_without_merge_details_sends_the_pr_alone(self) -> None:
+        t = FakeTracker({A: {}})
+        rc, _ = run(f"Task: {A}", t)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t.done_evidence(), [[{"kind": "pull_request", "id": "o/r#7", "state": "merged"}]])
+
+    def test_every_task_closed_gets_the_evidence(self) -> None:
+        t = FakeTracker({A: {}, B: {}})
+        rc, _ = run(f"Refs: {A}, {B}", t, extra={"MERGE_SHA": "abcdef1"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(t.done_evidence()), 2)
+        self.assertTrue(all(len(e) == 2 for e in t.done_evidence()))
+
+    def test_malformed_repo_or_number_gives_no_evidence(self) -> None:
+        self.assertEqual(com.close_evidence("not a repo", "7"), [])
+        self.assertEqual(com.close_evidence("o/r", "07"), [])
+        self.assertEqual(com.close_evidence("o/r", ""), [])
+
+    def test_bad_sha_and_time_are_dropped(self) -> None:
+        refs = com.close_evidence("o/r", "7", "zzz", "yesterday")
+        self.assertEqual(refs, [{"kind": "pull_request", "id": "o/r#7", "state": "merged"}])
+
+    def test_no_evidence_means_a_plain_move_and_a_warning(self) -> None:
+        t = FakeTracker({A: {}})
+        env_bad = {"REPO": "", "PR_NUMBER": "x"}
+        rc, out = run(f"Task: {A}", t, extra=env_bad)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t.done_evidence(), [None])
+        self.assertIn("No well-formed close evidence", out)
+
+    def test_in_review_move_sends_no_evidence(self) -> None:
+        t = FakeTracker({A: {"status": "in_progress", "summary": "**verification**: check it live"}})
+        rc, _ = run(f"Task: {A}", t, extra={"MERGE_SHA": "abcdef1"})
+        self.assertEqual(rc, 0)
+        moves = [d for m, p, d in t.calls if m == "POST" and p.endswith("/transition")]
+        self.assertEqual([d["to_status"] for d in moves], ["in_review"])
+        self.assertNotIn("evidence", moves[0])
+
+    def test_evidence_refusal_fails_red(self) -> None:
+        body = {"detail": {"error": "task_done_evidence_invalid", "problems": ["evidence[0]: bad"]}}
+        t = FakeTracker({A: {"transition": 422, "transition_body": body}})
+        rc, _ = run(f"Task: {A}", t)
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":
