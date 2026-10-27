@@ -159,7 +159,8 @@ jobs:
               names=$(jq -r '[.dependencies[] | select((.vulns|length)>0) | "\(.name)==\(.version) (\(.vulns|length))"] | .[]' "$out" | head -50)
               ;;
             pnpm|npm)
-              n=$(jq '.metadata.vulnerabilities.total // 0' "$out")
+              # npm reports a "total" key, pnpm does not: sum the severity buckets and ignore "total".
+              n=$(jq '(.metadata.vulnerabilities // {}) | del(.total) | [.[]] | add // 0' "$out")
               names=$(jq -r '(.advisories // {}) | to_entries[]? | "\(.value.module_name) \(.value.severity)"' "$out" 2>/dev/null | sort -u | head -50)
               if [ -z "$names" ]; then names=$(jq -r '(.vulnerabilities // {}) | to_entries[]? | "\(.key) \(.value.severity)"' "$out" 2>/dev/null | head -50); fi
               ;;
