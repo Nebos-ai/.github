@@ -71,11 +71,17 @@ jobs:
         id: scan
         continue-on-error: true
         run: |
-          set -uo pipefail
+          # No -e / pipefail: this scan is warn-first and must never fail the step.
+          set +e
+          set -u
           gitleaks detect --source . --redact --no-banner \
             --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" --exit-code 0
           rc=$?
-          if [ $rc -ne 0 ]; then echo "gitleaks failed to run (rc=$rc)"; exit $rc; fi
+          if [ $rc -ne 0 ] || [ ! -s "$RUNNER_TEMP/gitleaks.json" ]; then
+            echo "SOSS8_FINDINGS gitleaks=unknown"
+            echo "::warning title=gitleaks::scan could not run (rc=$rc)"
+            exit 0
+          fi
           n=$(jq 'length' "$RUNNER_TEMP/gitleaks.json")
           echo "SOSS8_FINDINGS gitleaks=${n}"
           {
@@ -83,7 +89,7 @@ jobs:
             if [ "$n" -gt 0 ]; then
               echo "| Rule | File | Line |"
               echo "|---|---|---|"
-              jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) |"' "$RUNNER_TEMP/gitleaks.json" | sort | uniq | head -50
+              jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) |"' "$RUNNER_TEMP/gitleaks.json" | sort -u | head -50
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$n" -gt 0 ]; then
@@ -117,7 +123,9 @@ jobs:
           DIR: ${{ matrix.dir }}
           REQ_FILE: ${{ matrix.file || 'requirements.txt' }}
         run: |
-          set -uo pipefail
+          # Audit tools exit non-zero when they find vulnerabilities. Warn-first: never fail.
+          set +e
+          set -u
           out="$RUNNER_TEMP/audit.json"
           n=unknown
           case "$KIND" in
@@ -126,7 +134,8 @@ jobs:
               uvx pip-audit -r "$RUNNER_TEMP/req.txt" --no-deps --disable-pip --format json > "$out"
               ;;
             requirements)
-              uvx pip-audit -r "$REQ_FILE" --no-deps --disable-pip --format json > "$out"
+              # Unpinned requirements.txt: let pip-audit resolve them (no --no-deps).
+              uvx pip-audit -r "$REQ_FILE" --format json > "$out"
               ;;
             pnpm)
               npx --yes pnpm@10 audit --json > "$out"
@@ -134,10 +143,14 @@ jobs:
             npm)
               npm audit --package-lock-only --json > "$out"
               ;;
-            *) echo "unknown kind $KIND"; exit 2 ;;
+            *) echo "unknown kind $KIND"; exit 0 ;;
           esac
-          # pip-audit and *-audit exit non-zero when vulns exist; the report is what counts.
-          if [ ! -s "$out" ]; then echo "audit produced no report"; exit 1; fi
+          # The report, not the exit code, is what counts.
+          if [ ! -s "$out" ] || ! jq -e . "$out" >/dev/null 2>&1; then
+            echo "SOSS8_FINDINGS audit kind=${KIND} dir=${DIR} vulns=unknown"
+            echo "::warning title=dependency audit (${KIND} ${DIR})::audit could not run or produced no report"
+            exit 0
+          fi
           case "$KIND" in
             uv|requirements)
               n=$(jq '[.dependencies[].vulns | length] | add // 0' "$out")
