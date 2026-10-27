@@ -21,6 +21,11 @@
 # printed (gitleaks runs with --redact). Each job prints one greppable line:
 #   SOSS8_FINDINGS gitleaks=<n>
 #   SOSS8_FINDINGS audit kind=<kind> dir=<dir> vulns=<n>
+# In a private repository the gitleaks job also prints one names-only line per finding,
+# read by nebos-backend's key rotation report (SOSS-25). Rule id, start line, commit date
+# and file only; never the Secret or Match fields. A public repository's job logs are
+# public, so there it prints the count line only.
+#   SOSS8_GITLEAKS rule=<rule id> line=<n> date=<commit date> file=<path>
 #
 # `targets` is a JSON array, e.g.
 #   [{"kind":"uv","dir":"."},{"kind":"npm","dir":"frontend"},
@@ -70,6 +75,8 @@ jobs:
       - name: Scan history (warn-first)
         id: scan
         continue-on-error: true
+        env:
+          REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
           # No -e / pipefail: this scan is warn-first and must never fail the step.
           set +e
@@ -84,6 +91,12 @@ jobs:
           fi
           n=$(jq 'length' "$RUNNER_TEMP/gitleaks.json")
           echo "SOSS8_FINDINGS gitleaks=${n}"
+          # Names only, one line per finding, for the key rotation report (SOSS-25): rule id,
+          # start line, commit date and file. Never the Secret or Match fields. Private
+          # repositories only, because a public repository's job logs are public.
+          if [ "$n" -gt 0 ] && [ "${REPO_PRIVATE:-}" = "true" ]; then
+            jq -r '.[] | "SOSS8_GITLEAKS rule=\(.RuleID) line=\(.StartLine) date=\(.Date) file=\(.File)"' "$RUNNER_TEMP/gitleaks.json" | head -n 500
+          fi
           {
             echo "### gitleaks: ${n} finding(s)"
             if [ "$n" -gt 0 ]; then
