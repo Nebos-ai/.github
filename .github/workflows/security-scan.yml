@@ -134,8 +134,10 @@ jobs:
               uvx pip-audit -r "$RUNNER_TEMP/req.txt" --no-deps --disable-pip --format json > "$out"
               ;;
             requirements)
-              # Unpinned requirements.txt: let pip-audit resolve them (no --no-deps).
-              uvx pip-audit -r "$REQ_FILE" --format json > "$out"
+              # No lockfile: audit only exact pins (name==version). Ranges and private
+              # packages cannot be resolved without credentials, so they are not covered.
+              grep -E '^[A-Za-z0-9_.-]+(\[[A-Za-z0-9_,.-]+\])?==' "$REQ_FILE" > "$RUNNER_TEMP/pinned.txt"
+              uvx pip-audit -r "$RUNNER_TEMP/pinned.txt" --no-deps --disable-pip --format json > "$out"
               ;;
             pnpm)
               npx --yes pnpm@10 audit --json > "$out"
