@@ -71,6 +71,16 @@
 #       commits, verified against the pinned key fingerprint. Without this,
 #       every Update-branch click and dependabot PR fails the floor.
 # ─────────────────────────────────────────────────────────────────────────────
+# 2026-10-14 amendment (DRAFT, ADR-PROV floor-signer-trust-source-org-list;
+# ships only as tag v2 after that ADR is ACCEPTED; v1 stays frozen):
+#
+#   (i) The signer check trusts the UNION of the org list (.git-signers/
+#       allowed_signers on nebos-governance `main`, literal ref, read with the
+#       org token) and the base branch's list. Both come from refs a PR cannot
+#       write, so a PR still cannot enroll the key that signs it.
+#   (j) If the org list cannot be read the check falls back to the base list
+#       alone (today's trust set) with a warning and trust_source=base-only.
+# ─────────────────────────────────────────────────────────────────────────────
 
 name: repo-governance-floor
 
@@ -279,6 +289,27 @@ jobs:
           fi
 
       # ── Signer check (always runs on PR context, no corpus needed) ───────
+      # Trust source (2026-10-14, ADR-PROV floor-signer-trust-source-org-list):
+      # the union of (i) the org list, .git-signers/allowed_signers on
+      # nebos-governance `main`, and (ii) the consumer's file at BASE_SHA. Both are
+      # read from refs a consumer PR cannot write, so a PR still cannot enroll the
+      # key that signs it. The org list ref is the literal `main`, never the
+      # `governance_ref` input and never the PR head.
+      - name: Checkout org signer list (nebos-governance main)
+        id: org_signers
+        if: inputs.allowed_signers_path != ''
+        continue-on-error: true # fail mode: fall back to the base-branch list, see sign step
+        uses: actions/checkout@v4
+        with:
+          repository: Nebos-ai/nebos-governance
+          ref: main
+          path: org-signers
+          sparse-checkout: .git-signers/allowed_signers
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+          persist-credentials: false
+          token: ${{ secrets.GOVERNANCE_MIRROR_TOKEN || secrets.GOVERNANCE_READ_TOKEN || github.token }}
+
       - name: Verify absorption/governance commits SSH-signed (when allowed_signers_path present)
         id: sign
         if: inputs.allowed_signers_path != ''
@@ -288,8 +319,11 @@ jobs:
           SIGNERS_PATH: ${{ inputs.allowed_signers_path }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ORG_OUTCOME: ${{ steps.org_signers.outcome }}
+          ORG_FILE: ${{ github.workspace }}/org-signers/.git-signers/allowed_signers
         run: |
           set -euo pipefail
+          # >>> signer-logic (extracted verbatim by tests/test_floor_signers.sh)
           if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
             echo "::notice::Not a pull_request context; SSH signer check applies to PR ranges only"
             echo "passed=n/a" >> "$GITHUB_OUTPUT"
@@ -298,11 +332,31 @@ jobs:
           # Trust the signer list on the base branch, never the PR's own copy:
           # otherwise a PR can enroll the key that signs it. Enrolling a new key
           # therefore takes a commit signed by a key the base already trusts.
-          TRUSTED="${RUNNER_TEMP:-/tmp}/allowed_signers.base"
-          if ! git show "${BASE_SHA}:${SIGNERS_PATH}" > "$TRUSTED" 2>/dev/null; then
+          BASE_LIST="${RUNNER_TEMP:-/tmp}/allowed_signers.base"
+          if ! git show "${BASE_SHA}:${SIGNERS_PATH}" > "$BASE_LIST" 2>/dev/null; then
             echo "::notice::${SIGNERS_PATH} not present on the base branch; skipping signer check (bootstrap posture)"
             echo "passed=skipped" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # Org list from nebos-governance main (checked out by the previous step).
+          # Unavailable (checkout failed, no token, file missing or without a key
+          # line) => fall back to the base list alone: exactly today's trust set,
+          # never wider, and never a locally supplied substitute.
+          TRUSTED="${RUNNER_TEMP:-/tmp}/allowed_signers.trusted"
+          TRUST_SOURCE="base-only"
+          : > "$TRUSTED"
+          if [[ "${ORG_OUTCOME:-}" == "success" && -f "${ORG_FILE:-}" ]] && grep -qvE '^[[:space:]]*(#|$)' "$ORG_FILE"; then
+            cat "$ORG_FILE" > "$TRUSTED"
+            printf '\n' >> "$TRUSTED"
+            TRUST_SOURCE="org+base"
+          else
+            echo "::warning title=floor-org-signers-unavailable::Could not read the org signer list from Nebos-ai/nebos-governance main; trusting the base branch's ${SIGNERS_PATH} only. Pass 'secrets: inherit' from the caller so GOVERNANCE_MIRROR_TOKEN reaches this workflow."
+          fi
+          cat "$BASE_LIST" >> "$TRUSTED"
+          echo "trust_source=${TRUST_SOURCE}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            ORG_SHA=$(git -C "${ORG_FILE%/.git-signers/allowed_signers}" rev-parse HEAD 2>/dev/null || echo unknown)
+            echo "Signer trust source: ${TRUST_SOURCE} (org list commit: ${ORG_SHA})" >> "$GITHUB_STEP_SUMMARY"
           fi
           COMMITS=$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}")
           # GitHub signs the commits it creates itself with its web-flow key:
@@ -342,11 +396,15 @@ jobs:
             FAILED=$((FAILED + 1))
           done <<< "$COMMITS"
           if [[ $FAILED -gt 0 ]]; then
-            echo "::error::$FAILED commit(s) not SSH-signed by a signer the base branch trusts"
+            echo "::error::$FAILED commit(s) not SSH-signed by a signer trusted via ${TRUST_SOURCE}"
+            if [[ "$TRUST_SOURCE" == "base-only" ]]; then
+              echo "::error::The org signer list was unavailable, so only the base branch's list was trusted. If the signing key is an org key, pass 'secrets: inherit' from the caller workflow."
+            fi
             echo "passed=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "passed=true" >> "$GITHUB_OUTPUT"
+          # <<< signer-logic
 
       - name: Compute compliance score
         id: score
