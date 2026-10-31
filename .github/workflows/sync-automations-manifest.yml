@@ -9,9 +9,9 @@
 #
 # Fails red (AUT-70) when no service key slot exchanges at /auth/service-token: the ::error:: names
 # AUT-70 and the HTTP status of every slot tried. Before AUT-70 this case only warned, so the run
-# stayed green and nothing was synced for weeks. Once authenticated it is still fail-soft while the
-# registry endpoint is not deployed (404/405) or the backend is 5xx. A manifest the registry rejects
-# (400/422) fails the run.
+# stayed green and nothing was synced for weeks. Once authenticated it also fails red (AUT-76) when the
+# registry answers 404/405, is still 5xx or unreachable after three tries, or confirms fewer rows than
+# the manifest holds (created+updated in its reply). A manifest the registry rejects (400/422) fails the run.
 #
 # Caller (copy as .github/workflows/sync-automations-manifest.yml; pin to a commit SHA):
 #
@@ -107,7 +107,7 @@ jobs:
           fi
           MANIFEST_JSON_OUT="$RUNNER_TEMP/automations.json" python3 .automation-tools/scripts/validate_automations_manifest.py \
             "$MANIFEST" .automation-tools/schemas/automations-manifest.schema.json "$REPO_NAME" consumer
-      - name: Sync manifest into the registry (main only, red when no key exchanges)
+      - name: Sync manifest into the registry (main only, red unless every row lands)
         if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         env:
           MANIFEST_JSON: ${{ runner.temp }}/automations.json

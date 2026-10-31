@@ -28,12 +28,19 @@ def make_jwt(claims: dict) -> str:
 
 
 class FakeBackend:
-    """key value -> (status, tenant). Records exchange order and PUT calls."""
+    """key value -> (status, tenant). Records exchange order and PUT calls.
 
-    def __init__(self, keys: dict[str, tuple[int, str | None]], put_status: int = 200, claim: str = "tenant_id") -> None:
+    put_status is one status, or a list answered in turn (the last one repeats). A 2xx PUT answers
+    put_body, by default the registry's real reply for the one-row manifest run_main writes.
+    """
+
+    def __init__(self, keys: dict[str, tuple[int, str | None]], put_status: int | list[int] = 200,
+                 claim: str = "tenant_id", put_body: object = None) -> None:
         self.claim = claim
         self.keys = keys
-        self.put_status = put_status
+        self.put_statuses = put_status if isinstance(put_status, list) else [put_status]
+        self.put_body = put_body if put_body is not None else {
+            "repo": "r", "created": 1, "updated": 0, "needs_review": []}
         self.exchanged: list[str] = []
         self.puts = 0
 
@@ -46,8 +53,9 @@ class FakeBackend:
                 return status, {"detail": "no"}
             claims = {"sub": "sa"} if tenant is None else {"sub": "sa", self.claim: tenant}
             return 200, {"data": {"access_token": make_jwt(claims)}}
+        status = self.put_statuses[min(self.puts, len(self.put_statuses) - 1)]
         self.puts += 1
-        return self.put_status, {}
+        return status, (self.put_body if 200 <= status < 300 else {"detail": "no"})
 
 
 def run_main(backend: FakeBackend, env: dict[str, str]) -> tuple[int, str]:
@@ -57,7 +65,7 @@ def run_main(backend: FakeBackend, env: dict[str, str]) -> tuple[int, str]:
         full = {"MANIFEST_JSON": str(mpath), "REPO_NAME": "r", "NEBOS_BACKEND_URL": BASE, **env}
         out = io.StringIO()
         with mock.patch.dict(os.environ, full, clear=True), mock.patch.object(sync, "call", backend), \
-                contextlib.redirect_stdout(out):
+                mock.patch.object(sync.time, "sleep"), contextlib.redirect_stdout(out):
             code = sync.main()
     return code, out.getvalue()
 
@@ -102,13 +110,64 @@ class FailRed(unittest.TestCase):
         _, out = run_main(FakeBackend({}), {"K1": "super-secret-value"})
         self.assertNotIn("super-secret-value", out)
 
-    def test_registry_not_deployed_after_auth_stays_soft(self) -> None:
-        code, _ = run_main(FakeBackend({"kb": (200, OP)}, put_status=404), {"KB": "kb"})
-        self.assertEqual(code, 0)
-
     def test_manifest_rejected_fails(self) -> None:
         code, _ = run_main(FakeBackend({"kb": (200, OP)}, put_status=422), {"KB": "kb"})
         self.assertEqual(code, 1)
+
+
+class RegistryAnswer(unittest.TestCase):
+    """AUT-76: after auth, only a 2xx confirming every manifest row passes."""
+
+    def test_404_fails_red_without_retry(self) -> None:
+        be = FakeBackend({"kb": (200, OP)}, put_status=404)
+        code, out = run_main(be, {"KB": "kb"})
+        self.assertEqual(code, 1)
+        self.assertEqual(be.puts, 1)
+        self.assertIn("::error::AUT-76", out)
+        self.assertIn("HTTP 404", out)
+
+    def test_5xx_retried_then_fails_red(self) -> None:
+        be = FakeBackend({"kb": (200, OP)}, put_status=503)
+        code, out = run_main(be, {"KB": "kb"})
+        self.assertEqual(code, 1)
+        self.assertEqual(be.puts, 3)
+        self.assertIn("::error::AUT-76", out)
+
+    def test_unreachable_retried_then_fails_red(self) -> None:
+        be = FakeBackend({"kb": (200, OP)}, put_status=0)
+        code, out = run_main(be, {"KB": "kb"})
+        self.assertEqual(code, 1)
+        self.assertEqual(be.puts, 3)
+        self.assertIn("unreachable", out)
+
+    def test_5xx_then_success_passes(self) -> None:
+        be = FakeBackend({"kb": (200, OP)}, put_status=[502, 200])
+        code, out = run_main(be, {"KB": "kb"})
+        self.assertEqual(code, 0)
+        self.assertEqual(be.puts, 2)
+        self.assertNotIn("::error::", out)
+
+    def test_full_count_passes_and_logs_it(self) -> None:
+        code, out = run_main(FakeBackend({"kb": (200, OP)}), {"KB": "kb"})
+        self.assertEqual(code, 0)
+        self.assertIn("1 of 1 automations (created 1, updated 0", out)
+
+    def test_shortfall_fails_red(self) -> None:
+        body = {"repo": "r", "created": 0, "updated": 0, "needs_review": []}
+        code, out = run_main(FakeBackend({"kb": (200, OP)}, put_body=body), {"KB": "kb"})
+        self.assertEqual(code, 1)
+        self.assertIn("accepted 0 of 1 manifest rows", out)
+
+    def test_reply_without_counts_fails_red(self) -> None:
+        code, out = run_main(FakeBackend({"kb": (200, OP)}, put_body={"ok": True}), {"KB": "kb"})
+        self.assertEqual(code, 1)
+        self.assertIn("without created/updated counts", out)
+
+    def test_needs_review_rows_are_named_and_pass(self) -> None:
+        body = {"repo": "r", "created": 0, "updated": 1, "needs_review": ["r.retired-job"]}
+        code, out = run_main(FakeBackend({"kb": (200, OP)}, put_body=body), {"KB": "kb"})
+        self.assertEqual(code, 0)
+        self.assertIn("r.retired-job", out)
 
 
 class ExpectedTenant(unittest.TestCase):
