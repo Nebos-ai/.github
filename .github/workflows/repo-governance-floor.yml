@@ -79,7 +79,20 @@
 #       org token) and the base branch's list. Both come from refs a PR cannot
 #       write, so a PR still cannot enroll the key that signs it.
 #   (j) If the org list cannot be read the check falls back to the base list
-#       alone (today's trust set) with a warning and trust_source=base-only.
+#       alone (today's trust set) with a warning and trust_source=base-only,
+#       unless the caller sets require_org_list: true, in which case it fails.
+#   (k) `trust_source` is a workflow_call output (org+base | base-only), set
+#       before the PR-context exit so a scheduled canary can read it.
+#   (l) A key whose fingerprint is listed in .git-signers/revoked_fingerprints
+#       on nebos-governance main (same literal-ref checkout) is rejected even if
+#       a list still carries it.
+#   (m) A `cert-authority` line without principals= and namespaces="git" in
+#       either list fails the step, naming the line. No cert-authority line
+#       belongs in the org list under this ADR (they are ADR draft PR 2776).
+#   (n) Callers pass only the secret this workflow needs, by name:
+#         secrets:
+#           GOVERNANCE_MIRROR_TOKEN: ${{ secrets.GOVERNANCE_MIRROR_TOKEN }}
+#       not `secrets: inherit` (review R7). Actions are pinned to full SHAs.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: repo-governance-floor
@@ -121,19 +134,29 @@ on:
         type: string
         default: "main"
 
+      require_org_list:
+        description: >-
+          When true, the signer check fails (red) if the org signer list on
+          nebos-governance main cannot be read, instead of falling back to the
+          base list with a warning. Every v2 rollout caller and the canary set
+          this to true so an expired GOVERNANCE_MIRROR_TOKEN is visible.
+        required: false
+        type: boolean
+        default: false
+
     secrets:
       GOVERNANCE_READ_TOKEN:
         description: >-
           Optional PAT or GitHub App installation token with contents:read on
           Nebos-ai/nebos-governance. When absent, the workflow degrades to
           warn-first (bundled checks only). Consumers wire it via
-          `secrets: inherit` (org-level secret) or by passing it explicitly.
+          passing it by name (preferred) or `secrets: inherit`.
         required: false
       GOVERNANCE_MIRROR_TOKEN:
         description: >-
           The org-wide read token under its org name (visibility: all). Preferred
           over GOVERNANCE_READ_TOKEN when both are present. Flows in via
-          `secrets: inherit`.
+          passing it by name (a `secrets:` map entry named GOVERNANCE_MIRROR_TOKEN).
         required: false
 
     outputs:
@@ -143,6 +166,17 @@ on:
           back to repo_inventory.json compliance_score attribute per Article XV
           para 2.
         value: ${{ jobs.floor.outputs.compliance_score }}
+      trust_source:
+        description: >-
+          Which signer lists the signer check trusted: "org+base" (org list on
+          nebos-governance main plus the base-branch list) or "base-only" (org
+          list unavailable). Empty when allowed_signers_path is empty.
+        value: ${{ jobs.floor.outputs.trust_source }}
+      org_list_sha:
+        description: >-
+          Commit of nebos-governance main whose .git-signers/allowed_signers was
+          read (audit trail of which org list a run trusted), or "unknown".
+        value: ${{ jobs.floor.outputs.org_list_sha }}
 
 # Prevent parallel floor runs on the same ref (per OR-H2 concurrency requirement)
 concurrency:
@@ -158,9 +192,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       compliance_score: ${{ steps.score.outputs.value }}
+      trust_source: ${{ steps.sign.outputs.trust_source }}
+      org_list_sha: ${{ steps.sign.outputs.org_list_sha }}
     steps:
       - name: Checkout consumer repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           path: consumer
           fetch-depth: 0
@@ -168,7 +204,7 @@ jobs:
       - name: Checkout nebos-governance for check scripts
         id: gov_checkout
         continue-on-error: true # warn-first: no cross-repo access ⇒ degrade, don't fail
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: Nebos-ai/nebos-governance
           ref: ${{ inputs.governance_ref }}
@@ -187,7 +223,7 @@ jobs:
             if [ "${HAS_GOV_TOKEN}" = "true" ]; then
               echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED even with the supplied GOVERNANCE_READ_TOKEN — token may be expired, revoked, or lack contents:read on that repo. Remote check scripts SKIPPED (bundled checks still run)."
             else
-              echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED. The default github.token has no read access to that private repo. To enable the full check suite, pass 'secrets: inherit' from the consumer workflow so the org secret GOVERNANCE_MIRROR_TOKEN reaches it (or pass GOVERNANCE_READ_TOKEN explicitly). Bundled checks still run this pass."
+              echo "::warning title=governance-floor-corpus-unreachable::Cross-repo checkout of Nebos-ai/nebos-governance FAILED. The default github.token has no read access to that private repo. To enable the full check suite, pass GOVERNANCE_MIRROR_TOKEN by name from the consumer workflow (or GOVERNANCE_READ_TOKEN). Bundled checks still run this pass."
             fi
             echo "have_corpus=false" >> "$GITHUB_OUTPUT"
           else
@@ -195,7 +231,7 @@ jobs:
           fi
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
@@ -299,12 +335,14 @@ jobs:
         id: org_signers
         if: inputs.allowed_signers_path != ''
         continue-on-error: true # fail mode: fall back to the base-branch list, see sign step
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: Nebos-ai/nebos-governance
           ref: main
           path: org-signers
-          sparse-checkout: .git-signers/allowed_signers
+          sparse-checkout: |
+            .git-signers/allowed_signers
+            .git-signers/revoked_fingerprints
           sparse-checkout-cone-mode: false
           fetch-depth: 1
           persist-credentials: false
@@ -321,43 +359,82 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ORG_OUTCOME: ${{ steps.org_signers.outcome }}
           ORG_FILE: ${{ github.workspace }}/org-signers/.git-signers/allowed_signers
+          REVOKED_FILE: ${{ github.workspace }}/org-signers/.git-signers/revoked_fingerprints
+          REQUIRE_ORG: ${{ inputs.require_org_list }}
         run: |
           set -euo pipefail
           # >>> signer-logic (extracted verbatim by tests/test_floor_signers.sh)
+          # 1. Decide and report the trust source first, so every context (including
+          #    the scheduled canary, which is not a pull_request) emits trust_source.
+          ORG_PART="${RUNNER_TEMP:-/tmp}/allowed_signers.org"
+          TRUST_SOURCE="base-only"
+          : > "$ORG_PART"
+          if [[ "${ORG_OUTCOME:-}" == "success" && -f "${ORG_FILE:-}" ]] && grep -qvE '^[[:space:]]*(#|$)' "$ORG_FILE"; then
+            cat "$ORG_FILE" > "$ORG_PART"
+            printf '\n' >> "$ORG_PART"
+            TRUST_SOURCE="org+base"
+          fi
+          ORG_SHA=$(git -C "${ORG_FILE%/.git-signers/allowed_signers}" rev-parse HEAD 2>/dev/null || echo unknown)
+          echo "trust_source=${TRUST_SOURCE}" >> "$GITHUB_OUTPUT"
+          echo "org_list_sha=${ORG_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            echo "Signer trust source: ${TRUST_SOURCE} (org list commit: ${ORG_SHA})" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$TRUST_SOURCE" == "base-only" ]]; then
+            # Org list unavailable (checkout failed, no token, file missing or without
+            # a key line). Default: fall back to the base list alone, exactly today's
+            # trust set, never wider and never a locally supplied substitute.
+            if [[ "${REQUIRE_ORG:-false}" == "true" ]]; then
+              echo "::error title=floor-org-signers-required::require_org_list is true but the org signer list on Nebos-ai/nebos-governance main could not be read. Check that GOVERNANCE_MIRROR_TOKEN is passed by name from the caller and has not expired."
+              echo "passed=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            echo "::warning title=floor-org-signers-unavailable::Could not read the org signer list from Nebos-ai/nebos-governance main; trusting the base branch's ${SIGNERS_PATH} only. Pass GOVERNANCE_MIRROR_TOKEN by name from the caller so it reaches this workflow."
+          fi
           if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
             echo "::notice::Not a pull_request context; SSH signer check applies to PR ranges only"
             echo "passed=n/a" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Trust the signer list on the base branch, never the PR's own copy:
-          # otherwise a PR can enroll the key that signs it. Enrolling a new key
-          # therefore takes a commit signed by a key the base already trusts.
+          # 2. Trust the signer list on the base branch, never the PR's own copy:
+          #    otherwise a PR can enroll the key that signs it. Enrolling a new key
+          #    therefore takes a commit signed by a key the base already trusts.
           BASE_LIST="${RUNNER_TEMP:-/tmp}/allowed_signers.base"
           if ! git show "${BASE_SHA}:${SIGNERS_PATH}" > "$BASE_LIST" 2>/dev/null; then
             echo "::notice::${SIGNERS_PATH} not present on the base branch; skipping signer check (bootstrap posture)"
             echo "passed=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Org list from nebos-governance main (checked out by the previous step).
-          # Unavailable (checkout failed, no token, file missing or without a key
-          # line) => fall back to the base list alone: exactly today's trust set,
-          # never wider, and never a locally supplied substitute.
+          # 3. A cert-authority line is only acceptable when scoped to git signatures
+          #    and to named principals; an unscoped one would trust any certificate it
+          #    issues for any principal. No cert-authority line belongs in the org list
+          #    under ADR-PROV floor-signer-trust-source (SSH CA is draft PR 2776).
+          CA_BAD=0
+          CA_RE='(^|[[:space:],])cert-authority([[:space:],]|$)'
+          for part in "org:$ORG_PART" "base:$BASE_LIST"; do
+            LN=0
+            while IFS= read -r l || [[ -n "$l" ]]; do
+              LN=$((LN + 1))
+              [[ "$l" =~ ^[[:space:]]*(#|$) ]] && continue
+              if [[ "$l" =~ $CA_RE ]] && ! { [[ "$l" == *principals=* ]] && [[ "$l" == *'namespaces="git"'* ]]; }; then
+                echo "::error::${part%%:*} signer list line ${LN}: cert-authority without principals= and namespaces=\"git\""
+                CA_BAD=$((CA_BAD + 1))
+              fi
+            done < "${part#*:}"
+          done
+          if [[ $CA_BAD -gt 0 ]]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # 4. Revoked fingerprints (from the same literal-main checkout as the org
+          #    list). Unreadable with the org list, so only enforced when it is read.
+          REVOKED="${RUNNER_TEMP:-/tmp}/revoked.fprs"
+          : > "$REVOKED"
+          if [[ "$TRUST_SOURCE" == "org+base" && -f "${REVOKED_FILE:-}" ]]; then
+            { grep -oE '^SHA256:[A-Za-z0-9+/]+' "$REVOKED_FILE" || true; } > "$REVOKED"
+          fi
           TRUSTED="${RUNNER_TEMP:-/tmp}/allowed_signers.trusted"
-          TRUST_SOURCE="base-only"
-          : > "$TRUSTED"
-          if [[ "${ORG_OUTCOME:-}" == "success" && -f "${ORG_FILE:-}" ]] && grep -qvE '^[[:space:]]*(#|$)' "$ORG_FILE"; then
-            cat "$ORG_FILE" > "$TRUSTED"
-            printf '\n' >> "$TRUSTED"
-            TRUST_SOURCE="org+base"
-          else
-            echo "::warning title=floor-org-signers-unavailable::Could not read the org signer list from Nebos-ai/nebos-governance main; trusting the base branch's ${SIGNERS_PATH} only. Pass 'secrets: inherit' from the caller so GOVERNANCE_MIRROR_TOKEN reaches this workflow."
-          fi
-          cat "$BASE_LIST" >> "$TRUSTED"
-          echo "trust_source=${TRUST_SOURCE}" >> "$GITHUB_OUTPUT"
-          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-            ORG_SHA=$(git -C "${ORG_FILE%/.git-signers/allowed_signers}" rev-parse HEAD 2>/dev/null || echo unknown)
-            echo "Signer trust source: ${TRUST_SOURCE} (org list commit: ${ORG_SHA})" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          cat "$ORG_PART" "$BASE_LIST" > "$TRUSTED"
           COMMITS=$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}")
           # GitHub signs the commits it creates itself with its web-flow key:
           # "Update branch" merges and dependabot commits. Accept exactly those two
@@ -377,9 +454,14 @@ jobs:
           FAILED=0
           while IFS= read -r sha; do
             [[ -z "$sha" ]] && continue
-            if GNUPGHOME="$NO_GPG_KEYS" git -c gpg.format=ssh \
+            if VOUT=$(GNUPGHOME="$NO_GPG_KEYS" git -c gpg.format=ssh \
                    -c gpg.ssh.allowedSignersFile="$TRUSTED" \
-                   verify-commit "$sha" 2>/dev/null; then
+                   verify-commit "$sha" 2>&1); then
+              FPR=$(grep -oE 'SHA256:[A-Za-z0-9+/]+' <<<"$VOUT" | head -1 || true)
+              if [[ -n "$FPR" ]] && grep -qxF "$FPR" "$REVOKED"; then
+                echo "::error::${sha:0:12} signed by revoked key ${FPR}"
+                FAILED=$((FAILED + 1))
+              fi
               continue
             fi
             PARENTS=$(git rev-list --parents -n 1 "$sha" | wc -w)
@@ -398,7 +480,7 @@ jobs:
           if [[ $FAILED -gt 0 ]]; then
             echo "::error::$FAILED commit(s) not SSH-signed by a signer trusted via ${TRUST_SOURCE}"
             if [[ "$TRUST_SOURCE" == "base-only" ]]; then
-              echo "::error::The org signer list was unavailable, so only the base branch's list was trusted. If the signing key is an org key, pass 'secrets: inherit' from the caller workflow."
+              echo "::error::The org signer list was unavailable, so only the base branch's list was trusted. If the signing key is an org key, pass GOVERNANCE_MIRROR_TOKEN by name from the caller workflow."
             fi
             echo "passed=false" >> "$GITHUB_OUTPUT"
             exit 1

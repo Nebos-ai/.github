@@ -1,18 +1,19 @@
 # Tests for the repo-governance-floor signer step (ADR-PROV
 # floor-signer-trust-source-org-list). Runs actionlint on the workflows and the
-# scripted signer test (tests/test_floor_signers.sh) on every PR that touches either.
+# scripted signer test (tests/test_floor_signers.sh).
+#
+# This job is a required status check on Nebos-ai/.github main (ruleset
+# main-protect), so it must report on EVERY pull request and on merge-queue runs:
+# no `paths:` filter (a filtered required check never reports and blocks the PR)
+# and a `merge_group` trigger (without it the queue stalls). Review R9.
+# The required context is the job name below: "actionlint and signer-step test".
 name: test-floor-signers
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/**"
-      - "tests/**"
+  merge_group:
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/**"
-      - "tests/**"
 
 permissions:
   contents: read
@@ -23,13 +24,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # actionlint is fetched as a release tarball and checked against a pinned sha256,
+      # never piped from a raw script (review R13).
       - name: actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+          ACTIONLINT_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
         run: |
           set -euo pipefail
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
-          ./actionlint -color .github/workflows/repo-governance-floor.yml .github/workflows/test-floor-signers.yml
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/repo-governance-floor.yml .github/workflows/test-floor-signers.yml
 
       - name: Signer-step test
         run: bash tests/test_floor_signers.sh
