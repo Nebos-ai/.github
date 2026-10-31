@@ -38,7 +38,10 @@ jobs:
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
-          "$RUNNER_TEMP/actionlint" -color .github/workflows/repo-governance-floor.yml .github/workflows/test-floor-signers.yml
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/repo-governance-floor.yml .github/workflows/test-floor-signers.yml .github/workflows/git-signers-gate.yml
 
       - name: Signer-step test
         run: bash tests/test_floor_signers.sh
+
+      - name: Signer-gate test
+        run: bash tests/test_signers_gate.sh
