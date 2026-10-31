@@ -1,0 +1,115 @@
+# git-signers-gate - makes `.git-signers/**` on nebos-governance un-editable by the PR it guards.
+#
+# Intended use: a REQUIRED WORKFLOW in an org ruleset ("Require workflows to pass before
+# merging", rule type `workflows`) that targets Nebos-ai/nebos-governance and pins THIS file
+# in Nebos-ai/.github by full commit SHA. A ruleset workflow is run from the source
+# repository at the ref or sha named in the ruleset, so a PR to nebos-governance cannot edit
+# or neuter the code that checks it. A plain `pull_request` workflow in nebos-governance
+# would run the PR's own copy and prove nothing (review R3, ADR-PROV
+# floor-signer-trust-source-org-list AD-4(ii)).
+#
+# Behaviour (ADR AD-4(ii), AD-6, review F10, R3, R10):
+#   - PR does not touch `.git-signers/**`: success at once.
+#   - PR touches it: every commit in BASE..HEAD must verify against the list as it stands on
+#     the PR's BASE and against the list on current main (both must pass; closes the stale-PR
+#     race). No web-flow exemption here: a signer-list change needs every commit signed by a
+#     listed key.
+#   - The PR must add an audit-event shard under docs/governance/audit_events/ (R11).
+#   - A cert-authority line ADDED by the PR fails (cert-authority and agent-identity trust are
+#     ADR draft PR 2776 and need founder sign-off; none enters under this ADR).
+#   - merge_group: success. The queue's squash commit is created by GitHub, so there is no
+#     signature to check; the PR was verified on its own pull_request run. The path-lock push
+#     ruleset and the direct-push detector (ADR critical path c and d) cover the rest.
+name: git-signers-gate
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  git-signers-gate:
+    name: git-signers-gate
+    # Ruleset workflows also run in their source repository; only the target repo has a list to guard.
+    if: github.repository == 'Nebos-ai/nebos-governance'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify signer-list changes
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAIN_REF: origin/main
+          LIST_PATH: .git-signers/allowed_signers
+        run: |
+          set -euo pipefail
+          # >>> gate-logic (extracted verbatim by tests/test_signers_gate.sh)
+          if [[ "$EVENT" == "merge_group" ]]; then
+            echo "::notice::merge_group: the PR was verified on its pull_request run; the queue commit is created by GitHub"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "::error::no pull_request base/head; the gate cannot decide"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          CHANGED=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}" -- .git-signers/ || true)
+          if [[ -z "$CHANGED" ]]; then
+            echo "::notice::PR does not touch .git-signers/**; nothing to verify"
+            echo "touched=false" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "touched=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::PR touches signer files: $(tr '\n' ' ' <<<"$CHANGED")"
+          TMP="${RUNNER_TEMP:-/tmp}"
+          BASE_LIST="$TMP/gate.base.signers"
+          MAIN_LIST="$TMP/gate.main.signers"
+          HEAD_LIST="$TMP/gate.head.signers"
+          if ! git show "${BASE_SHA}:${LIST_PATH}" > "$BASE_LIST" 2>/dev/null; then
+            echo "::error::${LIST_PATH} is absent on the PR base; cannot verify a signer change"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          git show "${MAIN_REF}:${LIST_PATH}" > "$MAIN_LIST"
+          git show "${HEAD_SHA}:${LIST_PATH}" > "$HEAD_LIST" 2>/dev/null || : > "$HEAD_LIST"
+          FAILED=0
+          # R11: one audit event per signer-list change. The PR must add a shard under
+          # docs/governance/audit_events/ (the trust change is then in the hash-chained ledger,
+          # not only in an ephemeral job summary).
+          if [[ -z "$(git diff --name-only --diff-filter=A "${BASE_SHA}...${HEAD_SHA}" -- docs/governance/audit_events/)" ]]; then
+            echo "::error::this PR changes .git-signers/** but adds no audit-event shard under docs/governance/audit_events/ (one per signer-list change)"
+            FAILED=$((FAILED + 1))
+          fi
+          # A cert-authority line added by this PR: out of scope for this ADR.
+          if { grep -vxFf "$BASE_LIST" "$HEAD_LIST" || true; } | grep -qE '(^|[[:space:],])cert-authority([[:space:],]|$)'; then
+            echo "::error::this PR adds a cert-authority line to ${LIST_PATH}; CA and agent-identity trust need founder sign-off under the SSH CA ADR (draft PR 2776)"
+            FAILED=$((FAILED + 1))
+          fi
+          NO_GPG_KEYS=$(mktemp -d)
+          while IFS= read -r sha; do
+            [[ -z "$sha" ]] && continue
+            for which in base main; do
+              L="$BASE_LIST"; [[ "$which" == "main" ]] && L="$MAIN_LIST"
+              if ! GNUPGHOME="$NO_GPG_KEYS" git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$L" verify-commit "$sha" >/dev/null 2>&1; then
+                echo "::error::${sha:0:12} is not signed by a key in the list on ${which}"
+                FAILED=$((FAILED + 1))
+              fi
+            done
+          done <<< "$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}")"
+          if [[ $FAILED -gt 0 ]]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+          # <<< gate-logic
