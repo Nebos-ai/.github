@@ -31,12 +31,14 @@ class FakeBackend:
     """key value -> (status, tenant). Records exchange order and PUT calls.
 
     put_status is one status, or a list answered in turn (the last one repeats). A 2xx PUT answers
-    put_body, by default the registry's real reply for the one-row manifest run_main writes.
+    put_body inside the backend's {"data": ...} envelope, as production does; put_body defaults to the
+    registry's real reply for the one-row manifest run_main writes. bare=True drops the envelope.
     """
 
     def __init__(self, keys: dict[str, tuple[int, str | None]], put_status: int | list[int] = 200,
-                 claim: str = "tenant_id", put_body: object = None) -> None:
+                 claim: str = "tenant_id", put_body: object = None, bare: bool = False) -> None:
         self.claim = claim
+        self.bare = bare
         self.keys = keys
         self.put_statuses = put_status if isinstance(put_status, list) else [put_status]
         self.put_body = put_body if put_body is not None else {
@@ -55,7 +57,9 @@ class FakeBackend:
             return 200, {"data": {"access_token": make_jwt(claims)}}
         status = self.put_statuses[min(self.puts, len(self.put_statuses) - 1)]
         self.puts += 1
-        return status, (self.put_body if 200 <= status < 300 else {"detail": "no"})
+        if not 200 <= status < 300:
+            return status, {"detail": "no"}
+        return status, (self.put_body if self.bare else {"data": self.put_body, "meta": {}})
 
 
 def run_main(backend: FakeBackend, env: dict[str, str]) -> tuple[int, str]:
@@ -151,6 +155,13 @@ class RegistryAnswer(unittest.TestCase):
         code, out = run_main(FakeBackend({"kb": (200, OP)}), {"KB": "kb"})
         self.assertEqual(code, 0)
         self.assertIn("1 of 1 automations (created 1, updated 0", out)
+
+    def test_envelope_is_unwrapped_and_bare_reply_still_passes(self) -> None:
+        # Production wraps every reply as {"data": <route body>, "meta": ...}; a bare body must work too.
+        body = {"repo": "r", "created": 0, "updated": 1, "needs_review": []}
+        self.assertEqual(sync.unwrap({"data": body, "meta": {}}), body)
+        code, _ = run_main(FakeBackend({"kb": (200, OP)}, put_body=body, bare=True), {"KB": "kb"})
+        self.assertEqual(code, 0)
 
     def test_shortfall_fails_red(self) -> None:
         body = {"repo": "r", "created": 0, "updated": 0, "needs_review": []}

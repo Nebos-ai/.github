@@ -146,6 +146,13 @@ def put_manifest(url: str, manifest: object, token: str) -> tuple[int, object]:
     return status, body
 
 
+def unwrap(body: object) -> object:
+    """The route's reply, out of the backend's {"data": ...} envelope (api/middleware/response_envelope.py)."""
+    if isinstance(body, dict) and isinstance(body.get("data"), dict):
+        return body["data"]
+    return body
+
+
 def count_mismatch(body: object, expected: int) -> str | None:
     """Error text when the registry's created+updated is not the manifest's row count; else None."""
     created = body.get("created") if isinstance(body, dict) else None
@@ -180,6 +187,7 @@ def main() -> int:
     expected = len(manifest["automations"])
     status, body = put_manifest(f"{base}/api/v1/automations/manifests/{repo}", manifest, token)
     if 200 <= status < 300:
+        body = unwrap(body)
         bad = count_mismatch(body, expected)
         if bad:
             print(f"::error::{bad}")
