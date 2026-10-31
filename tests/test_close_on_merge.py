@@ -499,6 +499,25 @@ class EvidenceTests(unittest.TestCase):
         refs = com.close_evidence("o/r", "7", "zzz", "yesterday")
         self.assertEqual(refs, [{"kind": "pull_request", "id": "o/r#7", "state": "merged"}])
 
+    def test_opened_at_rides_on_the_pr_ref_only(self) -> None:
+        refs = com.close_evidence("o/r", "7", "abcdef1", "2026-10-24T13:00:00Z", "2026-10-23T09:00:00Z")
+        self.assertEqual(refs[0]["opened_at"], "2026-10-23T09:00:00Z")
+        self.assertNotIn("opened_at", refs[1])
+
+    def test_empty_or_bad_opened_at_adds_no_key(self) -> None:
+        for bad in ("", "not-a-date"):
+            refs = com.close_evidence("o/r", "7", "", "", bad)
+            self.assertEqual(refs, [{"kind": "pull_request", "id": "o/r#7", "state": "merged"}])
+
+    def test_run_sends_opened_at_on_the_pr_ref(self) -> None:
+        t = FakeTracker({A: {}})
+        rc, _ = run(f"Task: {A}", t, extra={"PR_CREATED_AT": "2026-10-23T09:00:00Z"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            t.done_evidence(),
+            [[{"kind": "pull_request", "id": "o/r#7", "state": "merged", "opened_at": "2026-10-23T09:00:00Z"}]],
+        )
+
     def test_no_evidence_means_a_plain_move_and_a_warning(self) -> None:
         t = FakeTracker({A: {}})
         env_bad = {"REPO": "", "PR_NUMBER": "x"}

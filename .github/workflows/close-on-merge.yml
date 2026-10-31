@@ -15,7 +15,7 @@
 # (task 3d7ab1bb). "- [ ]" lines tick nothing; a refused tick fails the run.
 #
 # Evidence: every move to done names the merged PR (and the merge commit) as the tracker's
-# done-evidence gate asks (MTCE-65/MTCE-67), from MERGE_SHA and MERGED_AT below.
+# done-evidence gate asks (MTCE-65/MTCE-67), from MERGE_SHA, MERGED_AT and PR_CREATED_AT below.
 #
 # Caller (pin to a commit SHA, GitHub's recommended form for third-party-style reuse):
 #
@@ -85,4 +85,5 @@ jobs:
           REPO: ${{ github.repository }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
         run: python3 .close-on-merge/scripts/close_on_merge.py
