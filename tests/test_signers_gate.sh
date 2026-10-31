@@ -44,6 +44,10 @@ commit() {
   if [[ "$content" != "-" ]]; then
     mkdir -p "$(dirname "$REPO/$path")"
     printf '%s\n' "$content" >> "$REPO/$path"
+    if [[ "$path" == .git-signers/* && "${SHARD:-1}" == 1 ]]; then
+      mkdir -p "$REPO/docs/governance/audit_events"
+      echo "audit event" > "$REPO/docs/governance/audit_events/shard_$RANDOM.md"
+    fi
     git -C "$REPO" add -A
   fi
   git -C "$REPO" -c user.signingkey="$T/k_$key" commit -q -S --allow-empty -m "c by $key"
@@ -108,6 +112,10 @@ run_case "a change to revoked_fingerprints signed by a listed key passes" true
 new_repo 8
 commit other .git-signers/revoked_fingerprints "SHA256:abc"
 run_case "a change to revoked_fingerprints signed by an unlisted key fails" false
+
+new_repo 9
+SHARD=0 commit base .git-signers/allowed_signers "$(line other other)"
+run_case "a signer change without an audit-event shard fails (R11)" false
 
 echo "passed=$PASS failed=$FAILN"
 [[ $FAILN -eq 0 ]]

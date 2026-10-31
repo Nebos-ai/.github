@@ -14,6 +14,7 @@
 #     the PR's BASE and against the list on current main (both must pass; closes the stale-PR
 #     race). No web-flow exemption here: a signer-list change needs every commit signed by a
 #     listed key.
+#   - The PR must add an audit-event shard under docs/governance/audit_events/ (R11).
 #   - A cert-authority line ADDED by the PR fails (cert-authority and agent-identity trust are
 #     ADR draft PR 2776 and need founder sign-off; none enters under this ADR).
 #   - merge_group: success. The queue's squash commit is created by GitHub, so there is no
@@ -83,6 +84,13 @@ jobs:
           git show "${MAIN_REF}:${LIST_PATH}" > "$MAIN_LIST"
           git show "${HEAD_SHA}:${LIST_PATH}" > "$HEAD_LIST" 2>/dev/null || : > "$HEAD_LIST"
           FAILED=0
+          # R11: one audit event per signer-list change. The PR must add a shard under
+          # docs/governance/audit_events/ (the trust change is then in the hash-chained ledger,
+          # not only in an ephemeral job summary).
+          if [[ -z "$(git diff --name-only --diff-filter=A "${BASE_SHA}...${HEAD_SHA}" -- docs/governance/audit_events/)" ]]; then
+            echo "::error::this PR changes .git-signers/** but adds no audit-event shard under docs/governance/audit_events/ (one per signer-list change)"
+            FAILED=$((FAILED + 1))
+          fi
           # A cert-authority line added by this PR: out of scope for this ADR.
           if { grep -vxFf "$BASE_LIST" "$HEAD_LIST" || true; } | grep -qE '(^|[[:space:],])cert-authority([[:space:],]|$)'; then
             echo "::error::this PR adds a cert-authority line to ${LIST_PATH}; CA and agent-identity trust need founder sign-off under the SSH CA ADR (draft PR 2776)"
