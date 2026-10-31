@@ -36,7 +36,9 @@ The tracker's done-evidence gate (nebos-projects ``api/lib/task_done_evidence.py
 wants each close to name the record that shows the work landed. Every move to done sends
 ``evidence``: the merged PR ``{kind: pull_request, id: owner/repo#N, state: merged,
 as_of: <merged_at>}`` and, when the event gives it, the merge commit ``{kind: commit, id:
-owner/repo@<sha>}``. Each ref is built only when its parts match the tracker's own formats,
+owner/repo@<sha>}``. The PR ref also carries ``opened_at``, the PR's opened time, from which
+the tracker fills an empty started_at (TUPA-42); the tracker's evidence gate drops the key
+when it stores the record. Each ref is built only when its parts match the tracker's own formats,
 because the tracker refuses malformed evidence in every mode; with nothing well formed the
 move is sent without evidence, as before. Moves to in_review send none.
 
@@ -57,7 +59,8 @@ The script uses only the Python standard library. It holds no secret and no tena
 the key and the API base come from the environment.
 
 Environment: NEBOS_SERVICE_KEY, NEBOS_API_BASE, PR_NUMBER, PR_TITLE, PR_BODY, PR_URL, REPO,
-and optionally MERGE_SHA and MERGED_AT (the merge commit and merge time of the PR).
+and optionally MERGE_SHA, MERGED_AT and PR_CREATED_AT (the merge commit, merge time and opened
+time of the PR).
 """
 
 from __future__ import annotations
@@ -196,12 +199,12 @@ def _iso_time(value: str) -> bool:
 
 
 def close_evidence(
-    repo: str, pr_number: str, merge_sha: str = "", merged_at: str = ""
+    repo: str, pr_number: str, merge_sha: str = "", merged_at: str = "", opened_at: str = ""
 ) -> list[dict[str, str]]:
     """The done-evidence refs for this merge, or [] when repo or PR number is not well formed.
 
     Shapes are the tracker's MTCE-65 records: the merged PR (with ``as_of`` when the merge
-    time parses as ISO-8601) and the merge commit (when the sha is 7-40 lower-case hex).
+    time parses as ISO-8601, and ``opened_at`` when the opened time does) and the merge commit (when the sha is 7-40 lower-case hex).
     """
     repo = (repo or "").strip()
     number = (pr_number or "").strip()
@@ -211,6 +214,9 @@ def close_evidence(
     when = (merged_at or "").strip()
     if when and _iso_time(when):
         pr["as_of"] = when
+    opened = (opened_at or "").strip()
+    if opened and _iso_time(opened):
+        pr["opened_at"] = opened
     refs = [pr]
     sha = (merge_sha or "").strip().lower()
     if _SHA.match(sha):
@@ -348,7 +354,9 @@ def run(env: Mapping[str, str], http: HttpFn = http_json) -> int:
         return task.get("status"), (check if _LIVE_CHECK.search(check) else None)
 
     covered = covered_lines(pr_body)
-    evidence = close_evidence(repo, pr_number, env.get("MERGE_SHA", ""), env.get("MERGED_AT", ""))
+    evidence = close_evidence(
+        repo, pr_number, env.get("MERGE_SHA", ""), env.get("MERGED_AT", ""), env.get("PR_CREATED_AT", "")
+    )
     if evidence:
         print("Close evidence for each move to done: " + ", ".join(r["id"] for r in evidence))
     else:
