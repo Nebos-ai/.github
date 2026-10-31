@@ -1,0 +1,15 @@
+version: 1
+repo: nebos-example
+automations:
+  - slug: wrong.prefix
+    name: Bad
+    description: Slug prefix does not match the repo, runner is unknown, schedule has no interval
+    runner: cron_of_doom
+    triggers: [schedule]
+    schedule: "0 6 * * *"
+    expected_interval_minutes: null
+    run_now: {kind: none, target: null}
+    risk_tier: 4
+    scope: system
+    owner_team: engineering
+    source_path: does/not/exist.yml

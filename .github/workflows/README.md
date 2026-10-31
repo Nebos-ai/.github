@@ -94,3 +94,38 @@ individually via a coordinated PR wave.
 - Depends on: `nebos-governance/scripts/repo_structure_v5/` canonical home
   (RSSB-14 landed via PR #2229) + Constitution Article XV (ratified via
   PR #2222 merge commit `4481d587`).
+
+
+### `sync-automations-manifest.yml` and the `report-automation-run` action (AUT-61, AUT-62)
+
+Registration at creation and a run record for every run, for the Nebbos automation registry.
+
+- **Manifest.** Each repo keeps `.nebbos/automations.yaml` (schema: `schemas/automations-manifest.schema.json`).
+  A thin caller workflow runs `sync-automations-manifest.yml` on pull requests (validate only) and on pushes
+  to main that change the file (validate, then `PUT /api/v1/automations/manifests/{repo}`). Caller template
+  is in the header of the workflow file.
+- **Key slots (AUT-70).** The sync exchanges the first slot that works at `POST /auth/service-token`:
+  `NEBOS_BACKEND_SERVICE_KEY` (a backend key for the operator tenant `00000000-0000-4000-8000-000000000010`),
+  then `NEBOS_SERVICE_KEY`, `NEBOS_PROJECTS_SERVICE_KEY`, `NEBOS_SERVICE_TOKEN` (tracker keys, the backend
+  answers 401) and `BILLING_SERVICE_ACCOUNT_KEY` (rows land in that account's tenant). If no slot exchanges the
+  run **fails red** with an `::error::` naming AUT-70 and each slot's HTTP status. The log line
+  `registry auth: token from slot ... is for tenant ...` shows the tenant from the token's `org_id` claim; pass the
+  optional `expected_tenant_id` input to fail red when it differs. `secrets: inherit` passes the new secret.
+  Tests: `tests/test_sync_automations_manifest.py`.
+- **Run record.** Append to a scheduled job as the last step:
+
+  ```yaml
+  - name: Report run to the automation registry
+    if: always()
+    uses: Nebos-ai/.github/.github/actions/report-automation-run@<commit-sha>
+    with:
+      slug: billing.generate-invoices
+      service-key: ${{ secrets.NEBOS_SERVICE_KEY }}
+      backend-url: ${{ secrets.NEBOS_BACKEND_URL }}   # optional, defaults to https://api.nebbos.ai
+  ```
+
+  The job needs `actions: read` for an exact duration. The step never fails the calling job.
+- Both authenticate with a repo service key exchanged at `POST /auth/service-token`, the same pattern as
+  `main-red-alarm` and the billing job workflows. Both warn and pass while the registry endpoint is not
+  deployed. `report-automation-run` also still warns and passes when no key works (it must never fail the job it
+  reports on); it is not changed by AUT-70.

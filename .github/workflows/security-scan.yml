@@ -1,0 +1,188 @@
+# Nebos-ai reusable workflow — security-scan v1 (SOSS-8, 2026-10-27)
+#
+# Downstream consumers reference this via:
+#   uses: Nebos-ai/.github/.github/workflows/security-scan.yml@main
+#
+# What it does on every PR / push:
+#   1. gitleaks   — scans the full git history for committed secrets.
+#   2. dep audit  — one audit per entry in `targets`, using the lockfile's own tool:
+#                     uv           -> `uv export --frozen` then pip-audit
+#                     requirements -> pip-audit -r <file>
+#                     pnpm         -> pnpm audit (lockfile only, no install)
+#                     npm          -> npm audit --package-lock-only
+#
+# POSTURE: WARN-FIRST (ADR-115). Every scan step is `continue-on-error: true`, so
+# findings surface as ::warning:: annotations plus a job summary and NEVER fail the
+# job or block a merge. Do not add these jobs to any required-check ruleset yet.
+# Graduating to blocking is a deliberate later change: drop `continue-on-error` on
+# the scan steps once the ADR-115 criteria are met.
+#
+# Output is counts plus file / rule / package names only. Secret values are never
+# printed (gitleaks runs with --redact). Each job prints one greppable line:
+#   SOSS8_FINDINGS gitleaks=<n>
+#   SOSS8_FINDINGS audit kind=<kind> dir=<dir> vulns=<n>
+# In a private repository the gitleaks job also prints one names-only line per finding,
+# read by nebos-backend's key rotation report (SOSS-25). Rule id, start line, commit date
+# and file only; never the Secret or Match fields. A public repository's job logs are
+# public, so there it prints the count line only.
+#   SOSS8_GITLEAKS rule=<rule id> line=<n> date=<commit date> file=<path>
+#
+# `targets` is a JSON array, e.g.
+#   [{"kind":"uv","dir":"."},{"kind":"npm","dir":"frontend"},
+#    {"kind":"requirements","dir":"backend","file":"requirements.txt"}]
+# Leave it `[]` for repos with nothing to audit (gitleaks still runs).
+
+name: security-scan
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: JSON array of dependency-audit targets (kind, dir, optional file).
+        type: string
+        default: "[]"
+      gitleaks_version:
+        description: gitleaks release to install (without the leading v).
+        type: string
+        default: "8.28.0"
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks
+        env:
+          VER: ${{ inputs.gitleaks_version }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${VER}"
+          tarball="gitleaks_${VER}_linux_x64.tar.gz"
+          curl -fsSL -o "$tarball" "${base}/${tarball}"
+          curl -fsSL -o checksums.txt "${base}/gitleaks_${VER}_checksums.txt"
+          grep " ${tarball}\$" checksums.txt | sha256sum -c -
+          tar -xzf "$tarball" gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Scan history (warn-first)
+        id: scan
+        continue-on-error: true
+        env:
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          # No -e / pipefail: this scan is warn-first and must never fail the step.
+          set +e
+          set -u
+          gitleaks detect --source . --redact --no-banner \
+            --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" --exit-code 0
+          rc=$?
+          if [ $rc -ne 0 ] || [ ! -s "$RUNNER_TEMP/gitleaks.json" ]; then
+            echo "SOSS8_FINDINGS gitleaks=unknown"
+            echo "::warning title=gitleaks::scan could not run (rc=$rc)"
+            exit 0
+          fi
+          n=$(jq 'length' "$RUNNER_TEMP/gitleaks.json")
+          echo "SOSS8_FINDINGS gitleaks=${n}"
+          # Names only, one line per finding, for the key rotation report (SOSS-25): rule id,
+          # start line, commit date and file. Never the Secret or Match fields. Private
+          # repositories only, because a public repository's job logs are public.
+          if [ "$n" -gt 0 ] && [ "${REPO_PRIVATE:-}" = "true" ]; then
+            jq -r '.[] | "SOSS8_GITLEAKS rule=\(.RuleID) line=\(.StartLine) date=\(.Date) file=\(.File)"' "$RUNNER_TEMP/gitleaks.json" | head -n 500
+          fi
+          {
+            echo "### gitleaks: ${n} finding(s)"
+            if [ "$n" -gt 0 ]; then
+              echo "| Rule | File | Line |"
+              echo "|---|---|---|"
+              jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) |"' "$RUNNER_TEMP/gitleaks.json" | sort -u | head -50
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$n" -gt 0 ]; then
+            echo "::warning title=gitleaks::${n} possible committed secret(s); see job summary (rule and file only). Warn-first, not blocking."
+          fi
+
+  dependency-audit:
+    name: dependency audit (${{ matrix.kind }} ${{ matrix.dir }})
+    if: ${{ inputs.targets != '[]' && inputs.targets != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.targets) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        if: ${{ matrix.kind == 'uv' || matrix.kind == 'requirements' }}
+      - uses: actions/setup-node@v7
+        if: ${{ matrix.kind == 'pnpm' || matrix.kind == 'npm' }}
+        with:
+          node-version: "22"
+      - name: Audit (warn-first)
+        continue-on-error: true
+        working-directory: ${{ matrix.dir }}
+        env:
+          KIND: ${{ matrix.kind }}
+          DIR: ${{ matrix.dir }}
+          REQ_FILE: ${{ matrix.file || 'requirements.txt' }}
+        run: |
+          # Audit tools exit non-zero when they find vulnerabilities. Warn-first: never fail.
+          set +e
+          set -u
+          out="$RUNNER_TEMP/audit.json"
+          n=unknown
+          case "$KIND" in
+            uv)
+              uv export --frozen --no-hashes --no-emit-project -o "$RUNNER_TEMP/req.txt" >/dev/null
+              uvx pip-audit -r "$RUNNER_TEMP/req.txt" --no-deps --disable-pip --format json > "$out"
+              ;;
+            requirements)
+              # No lockfile: audit only exact pins (name==version). Ranges and private
+              # packages cannot be resolved without credentials, so they are not covered.
+              grep -E '^[A-Za-z0-9_.-]+(\[[A-Za-z0-9_,.-]+\])?==' "$REQ_FILE" > "$RUNNER_TEMP/pinned.txt"
+              uvx pip-audit -r "$RUNNER_TEMP/pinned.txt" --no-deps --disable-pip --format json > "$out"
+              ;;
+            pnpm)
+              npx --yes pnpm@10 audit --json > "$out"
+              ;;
+            npm)
+              npm audit --package-lock-only --json > "$out"
+              ;;
+            *) echo "unknown kind $KIND"; exit 0 ;;
+          esac
+          # The report, not the exit code, is what counts.
+          if [ ! -s "$out" ] || ! jq -e . "$out" >/dev/null 2>&1; then
+            echo "SOSS8_FINDINGS audit kind=${KIND} dir=${DIR} vulns=unknown"
+            echo "::warning title=dependency audit (${KIND} ${DIR})::audit could not run or produced no report"
+            exit 0
+          fi
+          case "$KIND" in
+            uv|requirements)
+              n=$(jq '[.dependencies[].vulns | length] | add // 0' "$out")
+              names=$(jq -r '[.dependencies[] | select((.vulns|length)>0) | "\(.name)==\(.version) (\(.vulns|length))"] | .[]' "$out" | head -50)
+              ;;
+            pnpm|npm)
+              # npm reports a "total" key, pnpm does not: sum the severity buckets and ignore "total".
+              n=$(jq '(.metadata.vulnerabilities // {}) | del(.total) | [.[]] | add // 0' "$out")
+              names=$(jq -r '(.advisories // {}) | to_entries[]? | "\(.value.module_name) \(.value.severity)"' "$out" 2>/dev/null | sort -u | head -50)
+              if [ -z "$names" ]; then names=$(jq -r '(.vulnerabilities // {}) | to_entries[]? | "\(.key) \(.value.severity)"' "$out" 2>/dev/null | head -50); fi
+              ;;
+          esac
+          echo "SOSS8_FINDINGS audit kind=${KIND} dir=${DIR} vulns=${n}"
+          {
+            echo "### ${KIND} audit (${DIR}): ${n} vulnerabilit(ies)"
+            if [ -n "${names:-}" ]; then echo '```'; echo "$names"; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$n" != "0" ]; then
+            echo "::warning title=dependency audit (${KIND} ${DIR})::${n} known vulnerabilit(ies); see job summary. Warn-first, not blocking."
+          fi

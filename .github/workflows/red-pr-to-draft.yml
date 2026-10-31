@@ -1,4 +1,4 @@
-# Nebos-ai reusable workflow — red-pr-to-draft v1
+# Nebos-ai reusable workflow — red-pr-to-draft v1 (+ merge-queue circuit breaker, task ecd1d418)
 #
 # Founder directive 2026-10-13 (tracker task 49347557): no agent may leave a PR
 # presented as ready while its tests fail. This is the server-side half: when a
@@ -22,6 +22,20 @@
 #       uses: Nebos-ai/.github/.github/workflows/red-pr-to-draft.yml@pr-guard-v2
 #       secrets: inherit
 #
+# MERGE-QUEUE CIRCUIT BREAKER (task ecd1d418-e83e-4950-8db9-a09b4edd4b2b, 2026-10-17): a PR that
+# is green on its own head but red in the merge group was re-added to the queue forever (billing
+# #555 152 times, governance #2793 152, backend #1777 54), by several actors (gh CLI under the
+# founder token, nebbos-mcp-bot via auto-merge-when-green, MCP gh_pr_enqueue). A merge-group run's
+# head SHA is the queue commit, not a PR head, so the job above can never match it. The second job
+# below handles runs whose event is merge_group: it reads the PR number from the queue branch
+# gh-readonly-queue/<base>/pr-<N>-<sha>, counts failed merge-group runs since the PR head's
+# latest commit, and at `failure_limit` (default 2) turns off auto-merge, converts the PR to draft
+# (a draft cannot be enqueued by anyone), adds the label queue-failed and posts ONE comment
+# (updated on later failures) naming the failing checks and the first error lines of their logs.
+# A new commit resets the count. Callers must also list their merge_group workflows in
+# `workflow_run.workflows`, and grant `issues: write` for the label and comment.
+# Callers that only want the breaker (not the red-PR drafting) pass `draft_red_prs: false`.
+#
 # Why a GitHub App token (v2): GITHUB_TOKEN is refused on the
 # convertPullRequestToDraft mutation ("Resource not accessible by integration",
 # nebos-billing run 38357787904), so v1 could never flip a PR. v2 mints a 1-hour
@@ -44,6 +58,15 @@ name: red-pr-to-draft (reusable)
 
 on:
   workflow_call:
+    inputs:
+      draft_red_prs:
+        description: Run the red-PR-to-draft job (set false for callers that only want the queue breaker).
+        type: boolean
+        default: true
+      failure_limit:
+        description: Failed merge-group attempts at which the queue breaker trips.
+        type: number
+        default: 2
     secrets:
       PR_GUARD_APP_PRIVATE_KEY:
         description: Private key of the Nebbos MCP bot GitHub App (5032125). Org secret.
@@ -54,11 +77,12 @@ permissions:
   pull-requests: write
   checks: read
   actions: read
+  issues: write
 
 jobs:
   draft:
     name: convert red PR to draft
-    if: ${{ contains(fromJSON('["failure","timed_out","startup_failure"]'), github.event.workflow_run.conclusion) }}
+    if: ${{ inputs.draft_red_prs && github.event.workflow_run.event != 'merge_group' && contains(fromJSON('["failure","timed_out","startup_failure"]'), github.event.workflow_run.conclusion) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Serialise per head SHA so two red workflows finishing together produce one
@@ -116,3 +140,153 @@ jobs:
             GH_TOKEN="$APP_TOKEN" gh api "repos/$REPO/issues/$number/comments" -f body="$body" >/dev/null
             echo "PR #$number drafted and commented."
           done
+
+  queue-breaker:
+    name: stop merge-queue retry loop
+    if: ${{ github.event.workflow_run.event == 'merge_group' && contains(fromJSON('["failure","timed_out","startup_failure"]'), github.event.workflow_run.conclusion) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Serialise per queue branch so two workflows failing together make one comment.
+    concurrency:
+      group: queue-breaker-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      LIMIT: ${{ inputs.failure_limit }}
+    steps:
+      - name: Mint a 1-hour Nebbos MCP bot App token (this repo, pull requests only)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: "5032125"
+          private-key: ${{ secrets.PR_GUARD_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+      - name: Count merge-group failures and trip the breaker
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Inputs (env): REPO, HEAD_BRANCH, RUN_ID, RUN_URL, LIMIT, GH_TOKEN (read + label + comment),
+          # APP_TOKEN (draft + disable auto-merge), DRY_RUN (optional, "1" = print instead of mutate).
+          DRY_RUN="${DRY_RUN:-0}"
+          MARKER='<!-- queue-circuit-breaker -->'
+
+          if [[ ! "$HEAD_BRANCH" =~ ^gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$ ]]; then
+            echo "Branch $HEAD_BRANCH is not a merge-queue branch; nothing to do."
+            exit 0
+          fi
+          N="${BASH_REMATCH[1]}"
+
+          pr=$(gh api "repos/$REPO/pulls/$N")
+          if [ "$(jq -r .state <<<"$pr")" != "open" ]; then
+            echo "PR #$N is not open; nothing to do."
+            exit 0
+          fi
+          head_sha=$(jq -r .head.sha <<<"$pr")
+          node_id=$(jq -r .node_id <<<"$pr")
+          is_draft=$(jq -r .draft <<<"$pr")
+          auto_merge=$(jq -r '.auto_merge != null' <<<"$pr")
+          since=$(gh api "repos/$REPO/commits/$head_sha" --jq .commit.committer.date)
+
+          # The queue recreates the same branch name (and SHA) on every retry while main and the PR are
+          # unchanged, so attempts cannot be told apart by branch. One attempt runs each workflow once, so
+          # the attempt count is the largest number of failed runs of any single workflow since the head commit.
+          runs=$(gh api -X GET "repos/$REPO/actions/runs" -f event=merge_group -f status=failure \
+            -f created=">=$since" -F per_page=100 --paginate \
+            --jq ".workflow_runs[] | select(.head_branch | test(\"/pr-$N-[0-9a-f]+\$\")) | {id, name, head_branch, html_url, created_at}" \
+            | jq -s '.')
+          attempts=$(jq 'group_by(.name) | map(length) | max // 0' <<<"$runs")
+          echo "PR #$N: $attempts failed merge-group attempt(s) since head commit $head_sha ($since); limit $LIMIT."
+          if [ "$attempts" -lt "$LIMIT" ]; then
+            echo "Below the limit; staying quiet."
+            exit 0
+          fi
+
+          # Failing check names and the first error lines, from the attempt that just failed.
+          details=""
+          # Failures of the latest attempt: the newest failed run of each workflow, within 30 minutes of this run.
+          this_runs=$(jq -c --argjson id "$RUN_ID" '
+            (map(select(.id == $id)) | .[0].created_at // (map(.created_at) | max)) as $t
+            | group_by(.name) | map(max_by(.created_at))
+            | .[] | select((.created_at | fromdateiso8601) > (($t | fromdateiso8601) - 1800))' <<<"$runs")
+          shown=0
+          while IFS= read -r run; do
+            [ -n "$run" ] || continue
+            rid=$(jq -r .id <<<"$run")
+            wname=$(jq -r .name <<<"$run")
+            jobs=$(gh api "repos/$REPO/actions/runs/$rid/jobs?filter=latest&per_page=100" \
+              --jq '.jobs[] | select(.conclusion=="failure" or .conclusion=="timed_out") | {id, name}' | jq -s '.')
+            count=$(jq 'length' <<<"$jobs")
+            if [ "$count" -eq 0 ]; then
+              details+=$'\n'"- \`$wname\` failed (no failed job recorded): $(jq -r .html_url <<<"$run")"
+              continue
+            fi
+            for i in $(seq 0 $((count - 1))); do
+              [ "$shown" -lt 6 ] || break
+              jid=$(jq -r ".[$i].id" <<<"$jobs")
+              jname=$(jq -r ".[$i].name" <<<"$jobs")
+              lines=$(gh api "repos/$REPO/actions/jobs/$jid/logs" 2>/dev/null \
+                | sed -E 's/\x1b\[[0-9;]*m//g; s/^[0-9T:.Z-]+ //; s/```/'"'''"'/g' \
+                | grep -iE 'error|failed|fatal|assert|exception|traceback' | grep -v '^##\[group\]' | head -5 || true)
+              details+=$'\n'"- \`$wname\` / \`$jname\`"
+              if [ -n "$lines" ]; then
+                details+=$'\n\n```\n'"$lines"$'\n```'
+              fi
+              shown=$((shown + 1))
+            done
+          done <<<"$this_runs"
+          [ -n "$details" ] || details=$'\n'"- see $RUN_URL"
+
+          body=$(printf '%s\n' \
+            "$MARKER" \
+            "**Merge queue stopped for this PR: it failed in the merge group $attempts times.**" \
+            "" \
+            "The PR was green on its own branch but red once combined with main in the queue. Auto-merge is off, the PR is back in draft, and it has the \`queue-failed\` label, so nobody (person, bot or script) can enqueue it again until it changes." \
+            "" \
+            "Failing checks in the latest attempt:$details" \
+            "" \
+            "Latest run: $RUN_URL" \
+            "" \
+            "Fix on the branch and mark ready for review. The count resets on a new commit. Remove the \`queue-failed\` label when you mark it ready.")
+
+          if [ "$DRY_RUN" = "1" ]; then
+            echo "DRY RUN: would disable auto-merge (currently on: $auto_merge), convert to draft (currently draft: $is_draft), label queue-failed, upsert comment:"
+            echo "-----"
+            echo "$body"
+            exit 0
+          fi
+
+          if [ "$auto_merge" = "true" ]; then
+            GH_TOKEN="$APP_TOKEN" gh api graphql \
+              -f query='mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }' \
+              -f id="$node_id" >/dev/null || echo "::warning::could not disable auto-merge on #$N (converting to draft also turns it off)"
+          fi
+          if [ "$is_draft" != "true" ]; then
+            GH_TOKEN="$APP_TOKEN" gh api graphql \
+              -f query='mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }' \
+              -f id="$node_id" >/dev/null
+            echo "PR #$N converted to draft."
+          fi
+          if ! gh api "repos/$REPO/labels/queue-failed" >/dev/null 2>&1; then
+            gh api "repos/$REPO/labels" -f name=queue-failed -f color=B60205 \
+              -f description="Failed the merge queue twice; fix, then remove this label" >/dev/null \
+              || echo "::warning::could not create the queue-failed label"
+          fi
+          gh api "repos/$REPO/issues/$N/labels" -f 'labels[]=queue-failed' >/dev/null \
+            || echo "::warning::could not add the queue-failed label to #$N"
+
+          existing=$(gh api "repos/$REPO/issues/$N/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -1 || true)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null
+            echo "Updated comment $existing on #$N."
+          else
+            gh api "repos/$REPO/issues/$N/comments" -f body="$body" >/dev/null
+            echo "Posted comment on #$N."
+          fi

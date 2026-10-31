@@ -1,0 +1,20 @@
+# Calls the reusable close-on-merge workflow from this repo on every PR touching it, so a
+# workflow GitHub would reject at startup fails here instead of in a consumer repo. The job is
+# skipped (the PR is not merged), but GitHub still validates the whole call.
+name: close-on-merge smoke
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/close-on-merge*.yml
+      - scripts/close_on_merge.py
+
+permissions:
+  contents: read
+
+jobs:
+  call:
+    uses: ./.github/workflows/close-on-merge.yml
+    secrets: inherit
+    with:
+      api_base: https://tracker.example

@@ -1,0 +1,56 @@
+name: report-automation-run
+description: >
+  Posts a run record for a GitHub Actions job to the Nebbos automation registry
+  (POST /api/v1/automations/{slug}/runs). Never fails the calling job: any problem is a warning.
+  Task AUT-62, project AUT e59d86d8.
+
+inputs:
+  slug:
+    description: Registry slug of the automation, as declared in .nebbos/automations.yaml (for example billing.generate-invoices).
+    required: true
+  outcome:
+    description: success, failure, cancelled or skipped. Empty means the calling job's status.
+    required: false
+    default: ""
+  summary:
+    description: One line describing what the run did. Default names the workflow and job.
+    required: false
+    default: ""
+  service-key:
+    description: A service key for POST /auth/service-token. Pass secrets.NEBOS_SERVICE_KEY (or the repo's equivalent). Without it the step warns and does nothing.
+    required: false
+    default: ""
+  backend-url:
+    description: nebos-backend base URL. Pass secrets.NEBOS_BACKEND_URL where the repo has it.
+    required: false
+    default: https://api.nebbos.ai
+  github-token:
+    description: Token with actions read, used to look up the job start time for the duration.
+    required: false
+    default: ${{ github.token }}
+  dry-run:
+    description: true prints the record and posts nothing.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Post run record (fail-soft)
+      shell: bash
+      env:
+        SLUG: ${{ inputs.slug }}
+        OUTCOME: ${{ inputs.outcome || job.status }}
+        SUMMARY: ${{ inputs.summary }}
+        SERVICE_KEY: ${{ inputs.service-key }}
+        BACKEND_URL: ${{ inputs.backend-url }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        EVENT_NAME: ${{ github.event_name }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        WORKFLOW_NAME: ${{ github.workflow }}
+        JOB_NAME: ${{ github.job }}
+        SERVER_URL: ${{ github.server_url }}
+      run: python3 "${{ github.action_path }}/report.py" || echo "::warning::report-automation-run failed unexpectedly; the calling job is not affected"

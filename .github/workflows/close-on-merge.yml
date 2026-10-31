@@ -1,0 +1,89 @@
+# Nebos-ai reusable workflow: close-on-merge (NPTE-181).
+#
+# One implementation of "a merged PR moves the tasks it names" for every Nebos-ai repo.
+# The logic is scripts/close_on_merge.py in THIS repo; the fixtures are tests/ and run in
+# close-on-merge-tests.yml. The five per-repo copies that closed any bare UUID are gone.
+#
+# Rule: only lines that start with Task:, Tasks:, Closes: or Refs: (any case) name a task.
+# Full UUIDs and short ids (PREFIX-N, for example PTR-1) on them count; a short id is resolved
+# to its task through the tracker (INFR-413). Prose, quotes, code blocks and checklist lines
+# never name a task.
+#
+# Steps: before moving a named task, the script ticks each of its open steps that a "- [x]"
+# line under the PR's Requirements heading covers (step id or the first 30 characters of the
+# title, the MCP requirements gate's rule), so a PR that delivers every step closes its task
+# (task 3d7ab1bb). "- [ ]" lines tick nothing; a refused tick fails the run.
+#
+# Evidence: every move to done names the merged PR (and the merge commit) as the tracker's
+# done-evidence gate asks (MTCE-65/MTCE-67), from MERGE_SHA, MERGED_AT and PR_CREATED_AT below.
+#
+# Caller (pin to a commit SHA, GitHub's recommended form for third-party-style reuse):
+#
+#   name: close-on-merge
+#   on:
+#     pull_request:
+#       types: [closed]
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   jobs:
+#     close-on-merge:
+#       if: github.event.pull_request.merged == true
+#       uses: Nebos-ai/.github/.github/workflows/close-on-merge.yml@<commit-sha>
+#       secrets: inherit
+#       with:
+#         api_base: https://<tracker-api-host>   # optional when the repo has a NEBOS_API_BASE secret
+#
+# GitHub rules relied on (docs.github.com, "Reuse workflows" and "Contexts reference"):
+#   - A called workflow reads the CALLER's github.event, so github.event.pull_request is the
+#     merged PR. Workflows in the same organization can pass all secrets with `secrets: inherit`;
+#     an inherited secret can be read in the called workflow without declaring it.
+#   - `{owner}/{repo}/.github/workflows/{file}@{ref}`: ref can be a SHA, tag or branch; the SHA is
+#     the safest. This repo is public, so no Actions access setting is needed to call it.
+#   - job.workflow_repository and job.workflow_sha give the reusable workflow's own repo and
+#     commit, so the script that runs is the one at the commit the caller pinned.
+#
+# Secrets (read from the caller, never stored here): NEBOS_SERVICE_KEY, or NEBOS_SERVICE_TOKEN
+# for nebos-projects. The API base is the api_base input, else the NEBOS_API_BASE secret.
+
+name: close-on-merge (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      api_base:
+        description: Tracker API base URL. When empty, the NEBOS_API_BASE secret is used.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  close-on-merge:
+    name: close-on-merge
+    if: ${{ github.event.pull_request.merged == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: "Fetch the script at this workflow's own commit"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .close-on-merge
+          persist-credentials: false
+      - name: "Move the tasks named on explicit Task:/Refs: lines"
+        env:
+          NEBOS_SERVICE_KEY: ${{ secrets.NEBOS_SERVICE_KEY || secrets.NEBOS_SERVICE_TOKEN }}
+          NEBOS_API_BASE: ${{ inputs.api_base || secrets.NEBOS_API_BASE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+        run: python3 .close-on-merge/scripts/close_on_merge.py

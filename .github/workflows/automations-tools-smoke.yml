@@ -1,0 +1,62 @@
+# Smoke test for the automation registry tooling (tasks AUT-61, AUT-62). A startup failure in the
+# reusable workflow or composite action shows on the PR that breaks it, not on nine repos later.
+name: automations-tools-smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/sync-automations-manifest.yml"
+      - ".github/workflows/automations-tools-smoke.yml"
+      - ".github/actions/report-automation-run/**"
+      - "schemas/automations-manifest.schema.json"
+      - "scripts/validate_automations_manifest.py"
+      - "scripts/sync_automations_manifest.py"
+      - "tests/fixtures/automations-*.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  validator:
+    name: validator accepts the valid fixture and rejects the invalid one
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m pip install --quiet pyyaml jsonschema
+      - name: Valid fixture passes
+        run: python3 scripts/validate_automations_manifest.py tests/fixtures/automations-valid.yaml schemas/automations-manifest.schema.json nebos-example .
+      - name: Hyphenated repo name passes (agent-gateway.<name>)
+        run: python3 scripts/validate_automations_manifest.py tests/fixtures/automations-valid-hyphenated-repo.yaml schemas/automations-manifest.schema.json nebos-agent-gateway .
+      - name: Invalid fixture fails
+        run: |
+          if python3 scripts/validate_automations_manifest.py tests/fixtures/automations-invalid.yaml schemas/automations-manifest.schema.json nebos-example . ; then
+            echo "::error::the invalid fixture passed validation"; exit 1
+          fi
+
+  reusable-workflow-startup:
+    name: reusable sync workflow starts and validates
+    uses: ./.github/workflows/sync-automations-manifest.yml
+    with:
+      manifest_path: tests/fixtures/automations-valid.yaml
+      repo_name: nebos-example
+    secrets: inherit
+
+  report-action:
+    name: report-automation-run action runs and never fails the caller
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Report with no service key (must warn and pass)
+        uses: ./.github/actions/report-automation-run
+        with:
+          slug: example.nightly-report
+          dry-run: "true"

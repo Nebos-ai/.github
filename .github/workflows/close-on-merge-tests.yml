@@ -1,0 +1,32 @@
+# Fixtures for the shared close-on-merge script (NPTE-181). Standard library only, no secrets.
+name: close-on-merge fixtures
+
+on:
+  pull_request:
+    paths:
+      - scripts/close_on_merge.py
+      - scripts/sync_automations_manifest.py
+      - tests/**
+      - .github/workflows/close-on-merge*.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/close_on_merge.py
+      - scripts/sync_automations_manifest.py
+      - tests/**
+      - .github/workflows/close-on-merge*.yml
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    name: close-on-merge fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run the fixtures
+        run: python3 -m unittest discover -s tests -v
