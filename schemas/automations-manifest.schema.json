@@ -33,7 +33,9 @@
           "required": ["kind", "target"],
           "properties": {
             "kind": {"enum": ["celery_task", "github_workflow_dispatch", "http_post", "workflow_execute", "temporal_start", "none"]},
-            "target": {"type": ["string", "null"]}
+            "target": {"type": ["string", "null"]},
+            "args": {"type": "array", "description": "celery_task only: positional arguments run-now passes, the same as the beat entry (AUT-74)."},
+            "kwargs": {"type": "object", "description": "celery_task only: keyword arguments run-now passes, the same as the beat entry (AUT-74). A string \"$setting:<name>\" is read from the backend settings when the run starts."}
           }
         },
         "risk_tier": {"enum": [1, 2, 3], "description": "1 read, 2 write, 3 money or destructive."},

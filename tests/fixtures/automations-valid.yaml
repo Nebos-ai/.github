@@ -25,3 +25,15 @@ automations:
     scope: per_tenant
     owner_team: engineering
     source_path: .github/workflows/close-on-merge.yml:1
+  - slug: example.view-refresh
+    name: View refresh
+    description: Refreshes one view; run-now passes the same arguments the schedule passes (AUT-74)
+    runner: celery_beat
+    triggers: [schedule, manual]
+    schedule: "0 * * * *"
+    expected_interval_minutes: 60
+    run_now: {kind: celery_task, target: example.tasks.refresh, args: [mv_example], kwargs: {full: true}}
+    risk_tier: 2
+    scope: system
+    owner_team: engineering
+    source_path: workers/celery_app.py#refresh-view
