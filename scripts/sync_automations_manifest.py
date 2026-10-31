@@ -12,8 +12,10 @@ Contract (AUT-70):
   It used to warn and pass, which hid weeks of missing syncs.
 - After an exchange the tenant id is read from the JWT claims and logged (never the key or token). When
   EXPECTED_TENANT_ID is set and differs, the run fails before anything is written.
-- Still fail-soft once authenticated: registry endpoint not deployed (404/405), 5xx or unreachable warn and
-  exit 0. A 400/422 means the manifest itself is wrong and exits 1.
+- Once authenticated, anything short of every row landing FAILS (exit 1, AUT-76): a 5xx or network failure
+  is retried twice (5 s, then 15 s) first; 404/405 fail at once; a 2xx whose created+updated differs from
+  the manifest's row count fails. These used to warn and pass, so a sync that never landed showed green.
+  A 400/422 means the manifest itself is wrong and exits 1.
 
 Env: MANIFEST_JSON, REPO_NAME, NEBOS_BACKEND_URL (optional), EXPECTED_TENANT_ID (optional), KB, K1..K4.
 No secret value is ever printed.
@@ -24,11 +26,15 @@ import base64
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
 DEFAULT_BACKEND = "https://api.nebbos.ai"
 TASK = "AUT-70"
+SYNC_TASK = "AUT-76"
+# Waits before the 2nd and 3rd PUT when the registry answers 5xx or cannot be reached.
+RETRY_WAIT_SECONDS = (5, 15)
 
 # (env var, secret name), tried in this order. The backend key goes first.
 SLOTS: list[tuple[str, str]] = [
@@ -122,6 +128,37 @@ def mint_token(base: str) -> tuple[str | None, str | None, list[tuple[str, str, 
     return None, None, attempts
 
 
+def transient(status: int) -> bool:
+    """A network failure (0) or a 5xx: worth another try."""
+    return status == 0 or status >= 500
+
+
+def put_manifest(url: str, manifest: object, token: str) -> tuple[int, object]:
+    """PUT the manifest; a transient answer is retried, 1 + len(RETRY_WAIT_SECONDS) tries in all."""
+    status, body = call("PUT", url, manifest, token)
+    for attempt, wait in enumerate(RETRY_WAIT_SECONDS, start=1):
+        if not transient(status):
+            break
+        got = "unreachable" if status == 0 else f"HTTP {status}"
+        print(f"::notice::registry PUT got {got} on try {attempt}; retrying in {wait}s")
+        time.sleep(wait)
+        status, body = call("PUT", url, manifest, token)
+    return status, body
+
+
+def count_mismatch(body: object, expected: int) -> str | None:
+    """Error text when the registry's created+updated is not the manifest's row count; else None."""
+    created = body.get("created") if isinstance(body, dict) else None
+    updated = body.get("updated") if isinstance(body, dict) else None
+    if not isinstance(created, int) or not isinstance(updated, int):
+        return (f"{SYNC_TASK}: registry answered 2xx without created/updated counts, so nothing shows the "
+                f"{expected} manifest rows landed.")
+    if created + updated != expected:
+        return (f"{SYNC_TASK}: registry accepted {created + updated} of {expected} manifest rows "
+                f"(created {created}, updated {updated}); the rest are not in the registry.")
+    return None
+
+
 def main() -> int:
     repo = os.environ["REPO_NAME"]
     base = (os.environ.get("NEBOS_BACKEND_URL", "").strip() or DEFAULT_BACKEND).rstrip("/")
@@ -140,17 +177,28 @@ def main() -> int:
         print(f"::error::{bad}")
         return 1
 
-    status, body = call("PUT", f"{base}/api/v1/automations/manifests/{repo}", manifest, token)
-    if status in (200, 201, 204):
-        print(f"registry accepted manifest for {repo}: {len(manifest['automations'])} automations "
-              f"(HTTP {status}, tenant {tenant or 'unknown'})")
+    expected = len(manifest["automations"])
+    status, body = put_manifest(f"{base}/api/v1/automations/manifests/{repo}", manifest, token)
+    if 200 <= status < 300:
+        bad = count_mismatch(body, expected)
+        if bad:
+            print(f"::error::{bad}")
+            return 1
+        assert isinstance(body, dict)
+        print(f"registry accepted manifest for {repo}: {expected} of {expected} automations "
+              f"(created {body['created']}, updated {body['updated']}, HTTP {status}, tenant {tenant or 'unknown'})")
+        stale = body.get("needs_review") or []
+        if stale:
+            print(f"::notice::{len(stale)} registry rows of {repo} are no longer in the manifest and are now "
+                  f"needs_review: {', '.join(map(str, stale[:20]))}")
         return 0
     if status in (400, 422):
         print(f"::error::registry rejected the manifest (HTTP {status}): {str(body)[:600]}")
         return 1
-    print(f"::warning::automation registry sync skipped (HTTP {status}): {str(body)[:300]}. "
-          "Expected while the registry endpoint is not deployed.")
-    return 0
+    got = "unreachable" if status == 0 else f"HTTP {status}"
+    print(f"::error::{SYNC_TASK}: automation registry sync FAILED ({got}): {str(body)[:300]}. "
+          f"The registry did not confirm the {expected} manifest rows.")
+    return 1
 
 
 if __name__ == "__main__":
