@@ -129,3 +129,22 @@ Registration at creation and a run record for every run, for the Nebbos automati
   `main-red-alarm` and the billing job workflows. Both warn and pass while the registry endpoint is not
   deployed. `report-automation-run` also still warns and passes when no key works (it must never fail the job it
   reports on); it is not changed by AUT-70.
+
+
+### `keep-prs-current.yml` (PHTW-212)
+
+After every push to main, every open PR, drafts included, that changes a file main has changed since the PR
+last took main in gets main merged into its branch, so a conflict surfaces at one commit and one file instead
+of hundreds (2026-11-04: 20 of 102 open PRs conflicted, 22-722 commits behind, 15 of them drafts).
+
+- **Generated files** listed in `generated_paths` take main's copy and `regen_command` rebuilds them.
+- **A real conflict** pushes nothing: the PR gets the `conflict` label and the files are in the job summary
+  (PHTW-213 routes the label to the PR's owner). The label is dropped once the PR is current again.
+- **Skipped:** merge-queue PRs, forks, clean auto-merge PRs (the queue builds on main) and branches this bot
+  updated under 30 minutes ago. Dependabot PRs get one `@dependabot rebase` comment per head commit instead of
+  a bot commit. Every push is a plain push; a branch that moved first wins and the next main push retries.
+- **Token:** the Nebbos MCP bot App (5032125) via the org secret `PR_GUARD_APP_PRIVATE_KEY`, so pushes start
+  the PR's CI. A repo calling this must be on that secret's repository list.
+- Caller template in the workflow header; logic in `scripts/keep_prs_current.py`, fixtures in
+  `tests/test_keep_prs_current.py`. Run `workflow_dispatch` with `dry_run: true` on a caller to list what it
+  would do.

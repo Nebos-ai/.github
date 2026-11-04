@@ -1,0 +1,195 @@
+# Nebos-ai reusable workflow: keep-prs-current (PHTW-212).
+#
+# After every push to main, every open PR (drafts included) that changes a file main has
+# changed since the PR last took main in gets main merged into its branch at once, so a
+# conflict surfaces while it is one commit and one file. Logic, rules and skips:
+# scripts/keep_prs_current.py in THIS repo (fixtures in tests/, run by
+# close-on-merge-tests.yml). In short:
+#   - conflicts only in `generated_paths` take main's copy, then `regen_command` rebuilds them;
+#   - a conflict in any other file pushes nothing, labels the PR `conflict` and lists the
+#     files in the job summary (PHTW-213 routes the label to the PR's owner);
+#   - Dependabot PRs get one "@dependabot rebase" comment per head commit, never a bot commit;
+#   - merge-queue PRs, forks, clean auto-merge PRs and branches this bot updated under
+#     30 minutes ago are skipped; every push is a plain push (never a force-push).
+# Replaces nebos-frontend's pr-cascade-update-on-merge.yml (it skipped drafts, and
+# red-pr-to-draft drafts every red PR) and nebos-backend's generated-conflict-merge.yml
+# (it acted only when every conflicted file was generated).
+#
+# Token: a 1-hour installation token of the Nebbos MCP bot App (5032125), from the org
+# secret PR_GUARD_APP_PRIVATE_KEY (as red-pr-to-draft). App pushes start the PR's CI;
+# GITHUB_TOKEN pushes do not. workflows: write is needed because merging main can carry
+# workflow-file changes into the branch. Commits are authored by nebbos-mcp-bot[bot].
+#
+# Permissions come from the caller (this file declares none, so a caller can add
+# id-token: write for an OIDC step such as nebos-backend's wheelhouse fetch).
+#
+# Caller (pin the SHA; every Nebos-ai repo pins its reusable workflows):
+#
+#   name: keep-prs-current
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#       inputs:
+#         dry_run:
+#           type: boolean
+#           default: false
+#   permissions:
+#     contents: read
+#   jobs:
+#     keep-current:
+#       uses: Nebos-ai/.github/.github/workflows/keep-prs-current.yml@<commit-sha>
+#       secrets: inherit
+#       with:
+#         generated_paths: pnpm-lock.yaml        # optional
+#         regen_command: pnpm install --lockfile-only   # optional
+#         dry_run: ${{ inputs.dry_run || false }}
+
+name: keep-prs-current (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      generated_paths:
+        description: "Paths whose conflicts take main's copy (space/newline separated; dir/ prefix, exact path or glob)."
+        type: string
+        default: ""
+      regen_command:
+        description: "Shell command run in the PR worktree after taking main's copy of conflicted generated paths."
+        type: string
+        default: ""
+      link_paths:
+        description: "Git-ignored inputs prepared in the main checkout to link into each worktree (e.g. frontend/node_modules wheelhouse)."
+        type: string
+        default: ""
+      setup_command:
+        description: "Shell command run once in the main checkout before the sweep (e.g. installing dependencies the regen needs)."
+        type: string
+        default: ""
+      python_version:
+        description: "When set, installs uv with this Python (for a uv-based regen)."
+        type: string
+        default: ""
+      uv_version:
+        description: "uv version for setup-uv."
+        type: string
+        default: ""
+      node_version:
+        description: "When set, installs Node.js."
+        type: string
+        default: ""
+      node_cache_dependency_path:
+        description: "npm lockfile for setup-node's cache (empty: no cache)."
+        type: string
+        default: ""
+      wheelhouse_bucket:
+        description: "When set, runs the caller's ./.github/actions/fetch-wheelhouse (nebos-backend); needs id-token: write."
+        type: string
+        default: ""
+      wheelhouse_role_arn:
+        type: string
+        default: ""
+      aws_region:
+        type: string
+        default: ""
+      base:
+        description: "Base branch PRs target."
+        type: string
+        default: main
+      dry_run:
+        description: "List what would happen; push, label and comment nothing."
+        type: boolean
+        default: false
+    secrets:
+      PR_GUARD_APP_PRIVATE_KEY:
+        description: Private key of the Nebbos MCP bot GitHub App (5032125). Org secret.
+        required: true
+
+jobs:
+  keep-current:
+    name: Merge main into PRs that share its changed files
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: keep-prs-current-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Mint a 1-hour Nebbos MCP bot App token (this repo)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: "5032125"
+          private-key: ${{ secrets.PR_GUARD_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-workflows: write
+
+      - name: Checkout the base branch (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the script at this workflow's own commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .keep-prs-current
+          persist-credentials: false
+
+      - name: Push credential (App token, local config so PR worktrees share it)
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          b64=$(printf 'x-access-token:%s' "${APP_TOKEN}" | base64 | tr -d '\n')
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic ${b64}"
+
+      - name: Setup uv
+        if: ${{ inputs.python_version != '' }}
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ inputs.uv_version }}
+          python-version: ${{ inputs.python_version }}
+
+      - name: Fetch the wheelhouse (caller's local action)
+        if: ${{ inputs.wheelhouse_bucket != '' }}
+        uses: ./.github/actions/fetch-wheelhouse
+        with:
+          bucket: ${{ inputs.wheelhouse_bucket }}
+          role-arn: ${{ inputs.wheelhouse_role_arn }}
+          region: ${{ inputs.aws_region }}
+
+      - name: Setup Node.js (with npm cache)
+        if: ${{ inputs.node_version != '' && inputs.node_cache_dependency_path != '' }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.node_cache_dependency_path }}
+
+      - name: Setup Node.js
+        if: ${{ inputs.node_version != '' && inputs.node_cache_dependency_path == '' }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Setup command
+        if: ${{ inputs.setup_command != '' }}
+        env:
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+        run: bash -euo pipefail -c "${SETUP_COMMAND}"
+
+      - name: Merge main into every PR that shares its changed files
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          KPC_BASE: ${{ inputs.base }}
+          KPC_GENERATED_PATHS: ${{ inputs.generated_paths }}
+          KPC_REGEN_COMMAND: ${{ inputs.regen_command }}
+          KPC_LINK_PATHS: ${{ inputs.link_paths }}
+          KPC_DRY_RUN: ${{ inputs.dry_run }}
+        run: python3 .keep-prs-current/scripts/keep_prs_current.py
