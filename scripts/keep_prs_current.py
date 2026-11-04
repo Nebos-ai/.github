@@ -11,8 +11,10 @@ What, per open same-repo PR targeting the base branch (drafts included):
   - up to date with main, or no file changed on main since the PR last took main in is
     also changed by the PR: nothing to do (a conflict needs a shared file);
   - in the merge queue: skipped (a queued branch cannot be pushed);
-  - Dependabot's PR: one "@dependabot rebase" comment per head commit, never a bot commit
-    (Dependabot stops rebasing a branch anyone else committed to);
+  - Dependabot's PR: never a bot commit (Dependabot stops rebasing a branch anyone else
+    committed to) and never a command comment (Dependabot answers an App's "@dependabot
+    rebase" with "only users with push access can use that command", 2026-11-04,
+    nebos-backend #1845); a trial merge labels it "conflict" when it would conflict;
   - head commit is this bot's own and under DEBOUNCE_MINUTES old: skipped;
   - otherwise merge main in a throwaway worktree. Conflicts only in generated paths take
     main's copy and the caller's regen command rebuilds them; then the merge is committed
@@ -38,7 +40,6 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
@@ -57,7 +58,6 @@ CONFLICT_LABEL = "conflict"
 CONFLICT_LABEL_COLOR = "B60205"
 CONFLICT_LABEL_DESCRIPTION = "Merging main conflicts in a file that is not generated (keep-prs-current)"
 DEPENDABOT_LOGINS = frozenset({"dependabot", "dependabot[bot]", "app/dependabot"})
-REBASE_COMMAND = "@dependabot rebase"
 SHA_TRAILER = "Main-SHA:"
 
 PR_QUERY = """
@@ -93,7 +93,7 @@ class Pr:
 @dataclass(frozen=True)
 class Outcome:
     number: int
-    result: str  # updated | conflict | would-update | dependabot-rebase | skipped(<why>)
+    result: str  # updated | conflict | would-update | skipped(<why>)
     files: tuple[str, ...] = ()
 
     def line(self) -> str:
@@ -106,9 +106,6 @@ class Github(Protocol):
 
     def remove_label(self, number: int) -> None: ...
 
-    def comment(self, number: int, body: str) -> None: ...
-
-    def rebase_requested_since(self, number: int, since_epoch: int) -> bool: ...
 
 
 # ---------------------------------------------------------------- pure helpers (tested)
@@ -313,14 +310,7 @@ def process_pr(
 
     stamp = _git(root, "log", "-1", "--format=%ct %ae", tip).stdout.split()
     commit_epoch, author_email = int(stamp[0]), (stamp[1] if len(stamp) > 1 else "")
-    if is_dependabot(pr.author):
-        if settings.dry_run:
-            return out("would-request(@dependabot rebase)", shared)
-        if gh.rebase_requested_since(pr.number, commit_epoch):
-            return out("skipped(dependabot rebase already requested)", shared)
-        gh.comment(pr.number, REBASE_COMMAND)
-        return out("dependabot-rebase", shared)
-    if debounced(author_email, commit_epoch, now()):
+    if not is_dependabot(pr.author) and debounced(author_email, commit_epoch, now()):
         return out(f"skipped(bot updated it under {DEBOUNCE_MINUTES} min ago)", shared)
 
     with tempfile.TemporaryDirectory(prefix="keep-prs-current-") as tmp:
@@ -349,6 +339,13 @@ def _merge(
     if merged.returncode and not conflicted:
         _abort(wt)
         return out("skipped(merge failed)")
+    if is_dependabot(pr.author):
+        _abort(wt)
+        if not conflicted:
+            return out("skipped(dependabot rebases its own PRs)", shared)
+        if not settings.dry_run and CONFLICT_LABEL not in pr.labels:
+            gh.add_label(pr.number)
+        return out("conflict", sorted(conflicted))
     generated, real = split_conflicts(conflicted, settings.generated)
     if real:
         _abort(wt)
@@ -433,18 +430,6 @@ class GhCli:
     def remove_label(self, number: int) -> None:
         self._gh("api", "-X", "DELETE", f"repos/{self.repo}/issues/{number}/labels/{CONFLICT_LABEL}", check=False)
 
-    def comment(self, number: int, body: str) -> None:
-        self._gh("api", f"repos/{self.repo}/issues/{number}/comments", "-f", f"body={body}")
-
-    def rebase_requested_since(self, number: int, since_epoch: int) -> bool:
-        raw = self._gh("api", "--paginate", f"repos/{self.repo}/issues/{number}/comments",
-                       "--jq", ".[] | [.created_at, .body] | @json")  # fmt: skip
-        for line in raw.splitlines():
-            created, body = json.loads(line)
-            when = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
-            if when >= since_epoch and (body or "").strip().lower().startswith(REBASE_COMMAND):
-                return True
-        return False
 
 
 # ---------------------------------------------------------------- main
