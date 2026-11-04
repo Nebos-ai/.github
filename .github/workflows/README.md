@@ -141,8 +141,9 @@ of hundreds (2026-11-04: 20 of 102 open PRs conflicted, 22-722 commits behind, 1
 - **A real conflict** pushes nothing: the PR gets the `conflict` label and the files are in the job summary
   (PHTW-213 routes the label to the PR's owner). The label is dropped once the PR is current again.
 - **Skipped:** merge-queue PRs, forks, clean auto-merge PRs (the queue builds on main) and branches this bot
-  updated under 30 minutes ago. Dependabot PRs get one `@dependabot rebase` comment per head commit instead of
-  a bot commit. Every push is a plain push; a branch that moved first wins and the next main push retries.
+  updated under 30 minutes ago. Dependabot PRs never get a bot commit or a command comment (Dependabot answers an
+  App with "only users with push access can use that command"); one that would conflict is labelled `conflict`.
+  Every push is a plain push; a branch that moved first wins and the next main push retries.
 - **Token:** the Nebbos MCP bot App (5032125) via the org secret `PR_GUARD_APP_PRIVATE_KEY`, so pushes start
   the PR's CI. A repo calling this must be on that secret's repository list.
 - Caller template in the workflow header; logic in `scripts/keep_prs_current.py`, fixtures in

@@ -8,7 +8,8 @@
 #   - conflicts only in `generated_paths` take main's copy, then `regen_command` rebuilds them;
 #   - a conflict in any other file pushes nothing, labels the PR `conflict` and lists the
 #     files in the job summary (PHTW-213 routes the label to the PR's owner);
-#   - Dependabot PRs get one "@dependabot rebase" comment per head commit, never a bot commit;
+#   - Dependabot PRs never get a bot commit or a command comment (Dependabot refuses an
+#     App's commands); one that would conflict is labelled `conflict`;
 #   - merge-queue PRs, forks, clean auto-merge PRs and branches this bot updated under
 #     30 minutes ago are skipped; every push is a plain push (never a force-push).
 # Replaces nebos-frontend's pr-cascade-update-on-merge.yml (it skipped drafts, and

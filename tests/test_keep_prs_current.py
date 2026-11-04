@@ -24,9 +24,8 @@ GENERATED = ("gen.json", "client/")
 
 
 class FakeGh:
-    def __init__(self, rebase_requested: bool = False) -> None:
+    def __init__(self) -> None:
         self.calls: list[tuple[str, int, str]] = []
-        self.rebase_requested = rebase_requested
 
     def add_label(self, number: int) -> None:
         self.calls.append(("add_label", number, kpc.CONFLICT_LABEL))
@@ -34,11 +33,6 @@ class FakeGh:
     def remove_label(self, number: int) -> None:
         self.calls.append(("remove_label", number, kpc.CONFLICT_LABEL))
 
-    def comment(self, number: int, body: str) -> None:
-        self.calls.append(("comment", number, body))
-
-    def rebase_requested_since(self, number: int, since_epoch: int) -> bool:
-        return self.rebase_requested
 
 
 class PureHelpers(unittest.TestCase):
@@ -222,15 +216,19 @@ class ProcessPr(unittest.TestCase):
         self.assertEqual(outcome.result, "conflict")
         self.assertEqual(gh.calls, [])
 
-    def test_dependabot_gets_one_rebase_comment_and_no_commit(self) -> None:
+    def test_dependabot_clean_merge_gets_no_commit_and_no_comment(self) -> None:
         tip = self.repo.commit_on("feat/x", "origin/main", [("app.py", "top = 1", "top = 2")])
         self.repo.commit_on("main", "origin/main", [("app.py", "bottom = 1", "bottom = 2")])
         outcome, gh = self.run_pr(self.pr(tip, author="dependabot"))
-        self.assertEqual(outcome.result, "dependabot-rebase")
-        self.assertEqual(gh.calls, [("comment", 1, kpc.REBASE_COMMAND)])
-        again, gh2 = self.run_pr(self.pr(tip, author="dependabot"), FakeGh(rebase_requested=True))
-        self.assertEqual(again.result, "skipped(dependabot rebase already requested)")
-        self.assertEqual(gh2.calls, [])
+        self.assertEqual(outcome.result, "skipped(dependabot rebases its own PRs)")
+        self.assertEqual((gh.calls, self.repo.remote_tip("feat/x")), ([], tip))
+
+    def test_dependabot_conflict_is_labelled_never_pushed(self) -> None:
+        tip = self.repo.commit_on("feat/x", "origin/main", [("gen.json", '"v": 0', '"v": 1')])
+        self.repo.commit_on("main", "origin/main", [("gen.json", '"v": 0', '"v": 2')])
+        outcome, gh = self.run_pr(self.pr(tip, author="dependabot[bot]"))
+        self.assertEqual((outcome.result, outcome.files), ("conflict", ("gen.json",)))
+        self.assertEqual(gh.calls, [("add_label", 1, kpc.CONFLICT_LABEL)])
         self.assertEqual(self.repo.remote_tip("feat/x"), tip)
 
     def test_bot_commit_under_30_minutes_old_is_debounced(self) -> None:
