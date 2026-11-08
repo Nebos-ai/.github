@@ -42,7 +42,9 @@ on:
         type: string
         default: "[]"
       gitleaks_version:
-        description: gitleaks release to install (without the leading v).
+        description: >-
+          gitleaks version (without the leading v). Only the default is available: the image is
+          pinned by digest for 8.28.0, and any other value fails the install step early.
         type: string
         default: "8.28.0"
 
@@ -59,19 +61,37 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install gitleaks
+      # 2026-11-08 GitHub release outage: github.com/.../releases/download answered 504 from about
+      # 09:12Z, so the old curl install failed this scan on every PR in every repo. CI tools now come
+      # from a container image pinned by digest (the same pattern as actionlint in nebos-frontend),
+      # not from a release download. The digest below is the OCI index of
+      # ghcr.io/gitleaks/gitleaks:v8.28.0 (read from the registry, HEAD on the manifest, header
+      # Docker-Content-Digest). It serves the default gitleaks_version only.
+      - name: Install gitleaks (pinned image)
         env:
           VER: ${{ inputs.gitleaks_version }}
+          PINNED_VER: "8.28.0"
+          IMAGE: ghcr.io/gitleaks/gitleaks@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854
         run: |
           set -euo pipefail
-          base="https://github.com/gitleaks/gitleaks/releases/download/v${VER}"
-          tarball="gitleaks_${VER}_linux_x64.tar.gz"
-          curl -fsSL -o "$tarball" "${base}/${tarball}"
-          curl -fsSL -o checksums.txt "${base}/gitleaks_${VER}_checksums.txt"
-          grep " ${tarball}\$" checksums.txt | sha256sum -c -
-          tar -xzf "$tarball" gitleaks
-          sudo mv gitleaks /usr/local/bin/gitleaks
-          gitleaks version
+          if [ "$VER" != "$PINNED_VER" ]; then
+            echo "::error title=gitleaks::gitleaks_version=${VER} is not available: only ${PINNED_VER} is pinned by image digest. Drop the input or update the digest in Nebos-ai/.github security-scan.yml."
+            exit 1
+          fi
+          docker pull "$IMAGE"
+          mkdir -p "$RUNNER_TEMP/bin"
+          # The wrapper keeps the scan step unchanged: the repo is mounted at /repo (cwd) and
+          # RUNNER_TEMP at the same path, so --report-path "$RUNNER_TEMP/gitleaks.json" lands on the host.
+          # The image entrypoint is gitleaks. safe.directory avoids git dubious-ownership on the mount.
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'exec docker run --rm -v "$PWD:/repo" -v "$RUNNER_TEMP:$RUNNER_TEMP" -w /repo \'
+            echo '  -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0="*" \'
+            echo "  \"$IMAGE\" \"\$@\""
+          } > "$RUNNER_TEMP/bin/gitleaks"
+          chmod +x "$RUNNER_TEMP/bin/gitleaks"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/gitleaks" version
       - name: Scan history (warn-first)
         id: scan
         continue-on-error: true
