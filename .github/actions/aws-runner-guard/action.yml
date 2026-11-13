@@ -1,0 +1,45 @@
+name: aws-runner-guard
+description: >
+  Fails a pull request when a CI job that can run on AWS runners (runs-on reads a NEBBOS_CI_RUNNER
+  org variable) references a secret that is not in the repo's allowlist. Warns when a heavy job
+  hard-codes ubuntu-*. Tracker task AUT-113. Holds no secrets and no repo-specific data.
+
+inputs:
+  allowlist:
+    description: Path of the repo's allowlist file, relative to the repo root.
+    required: false
+    default: .github/aws-runner-secrets-allowlist.yml
+  workflows-dir:
+    description: Directory holding the workflow files.
+    required: false
+    default: .github/workflows
+  runner-pr:
+    description: Pass vars.NEBBOS_CI_RUNNER_PR. A value that is not a GitHub-hosted label means the repo has been flipped to AWS.
+    required: false
+    default: ""
+  runner-queue:
+    description: Pass vars.NEBBOS_CI_RUNNER_QUEUE (same rule).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Run the guard
+      shell: bash
+      env:
+        GUARD_DIR: ${{ github.action_path }}
+        GUARD_ALLOWLIST: ${{ inputs.allowlist }}
+        GUARD_WORKFLOWS_DIR: ${{ inputs.workflows-dir }}
+        GUARD_RUNNER_PR: ${{ inputs.runner-pr }}
+        GUARD_RUNNER_QUEUE: ${{ inputs.runner-queue }}
+      run: |
+        set -euo pipefail
+        python3 -m venv "$RUNNER_TEMP/aws-runner-guard-venv"
+        "$RUNNER_TEMP/aws-runner-guard-venv/bin/pip" install --quiet --disable-pip-version-check "pyyaml==6.0.2"
+        "$RUNNER_TEMP/aws-runner-guard-venv/bin/python" "$GUARD_DIR/aws_runner_guard.py" \
+          --repo-root "$GITHUB_WORKSPACE" \
+          --allowlist "$GUARD_ALLOWLIST" \
+          --workflows-dir "$GUARD_WORKFLOWS_DIR" \
+          --runner-pr "$GUARD_RUNNER_PR" \
+          --runner-queue "$GUARD_RUNNER_QUEUE"

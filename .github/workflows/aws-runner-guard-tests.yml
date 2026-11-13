@@ -1,0 +1,33 @@
+# Fixtures for the aws-runner-guard composite action (AUT-113). PyYAML only; no secrets.
+name: aws-runner-guard fixtures
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/aws-runner-guard/**
+      - .github/workflows/aws-runner-guard-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/aws-runner-guard/**
+      - .github/workflows/aws-runner-guard-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    name: aws-runner-guard fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run the fixtures
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/v"
+          "$RUNNER_TEMP/v/bin/pip" install --quiet --disable-pip-version-check "pyyaml==6.0.2"
+          cd .github/actions/aws-runner-guard
+          "$RUNNER_TEMP/v/bin/python" -m unittest -v test_aws_runner_guard
