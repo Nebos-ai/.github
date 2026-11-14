@@ -58,19 +58,45 @@ jobs:
    is treated as variable-routed: rules 1 and 2 apply to it, so the secret allowlist and the flip
    check cover a job that hard-codes the Spot or On-Demand label.
 4. **Trusted pool (AUT-120, ADR AD-7a).** The `nebbos-ci-ondemand` pool may write the `trusted/` cache
-   prefix, so it is only for trusted runs. The guard fails any job that names it unless every event in
+   prefix, so it is only for trusted runs. The guard fails any job that can reach it unless every event in
    the workflow's `on:` is trusted. Trusted events: `merge_group`, and `push` limited to
    `branches: [main]` (a branch list of exactly `main`; no `tags`, no `branches-ignore`, no other branch,
    no pattern). Every other event is untrusted, including `pull_request`, `pull_request_target`,
-   `workflow_dispatch`, `schedule`, `workflow_call` (the caller's event decides, and the guard does not
-   follow callers), `issue_comment`, a `push` with no branch filter, and a workflow with no `on:` at
-   all. A job-level `if:` is not honoured: limit the events, not the job. The sanctioned way to reach
-   the pool stays the variable, `runs-on: ${{ fromJSON(vars.NEBBOS_CI_RUNNER_QUEUE) }}` style routing,
-   which has no literal label. A literal `nebbos-ci-ondemand` inside a `${{ }}` expression is an error
-   even on `merge_group`: the message tells the author to use the variable routing. Label matching is
-   by prefix `nebbos-ci-ondemand` (so a future `nebbos-ci-ondemand-large` is covered).
-5. **Warn-first.** `heavy_jobs` lists the heavy jobs (the set in research record 17ed3f20). One that
+   `schedule`, `workflow_dispatch`, `workflow_call`, `issue_comment`, a `push` with no branch filter,
+   and a workflow with no `on:` at all. A job-level `if:` is not honoured: limit the events, not the job.
+   The sanctioned way to reach the pool is the variable, `runs-on: ${{ fromJSON(vars.NEBBOS_CI_RUNNER_QUEUE) }}`
+   style routing, which has no literal label. A literal `nebbos-ci-ondemand` inside a `${{ }}` expression
+   is an error even on `merge_group`; the message tells the author to use the variable routing. Labels
+   match by prefix `nebbos-ci-ondemand`.
+   A reusable workflow cannot hard-code `nebbos-ci-ondemand`: its own events are `workflow_call`, which
+   is untrusted, so the guard fails it.
+5. **Fail closed on runs-on expressions.** In a workflow with an untrusted event, a `runs-on` that
+   contains `${{ }}` is accepted only when the guard can resolve it:
+   - the sanctioned `vars.NEBBOS_CI_RUNNER_*` routing (plus `fromJSON`, `github.event_name`,
+     `github.ref` and `github.ref_name`, which a PR author cannot set);
+   - `matrix.X`, when every value of X in `strategy.matrix`, `include:` entries included, is a plain
+     literal or the routing; each literal is judged by the rules above;
+   - `inputs.X` in a `workflow_call` callee, when every local caller's `with:` value for X (or the
+     input's default) is the routing or a plain literal. The caller's events decide the On-Demand rule,
+     and the error is reported at the caller's `with:` line. A callee with no local caller has nothing
+     to reach it that the guard can see, so it passes (a caller in another repo is judged by that repo's
+     guard, which reads its `with:` directly);
+   - a `needs.<job>.outputs.X` read of a job that itself reads the routing;
+   - an expression made only of GitHub-hosted labels.
+   Anything else (`env.X`, `format(...)`, a label built from pieces, `github.event.pull_request.title`,
+   a matrix built from an unknown expression) is an error: "runs-on expression the guard cannot resolve;
+   use a literal label, a matrix of literals or vars.NEBBOS_CI_RUNNER_* routing". The `with:` of a
+   reusable-workflow call is also scanned: a literal `nebbos-ci-*` label there makes the call routed,
+   and for a callee outside this repo the label is judged against the caller's events.
+6. **Warn-first.** `heavy_jobs` lists the heavy jobs (the set in research record 17ed3f20). One that
    still hard-codes `runs-on: ubuntu-*` raises a warning, never a failure.
+
+## What the guard can and cannot do
+
+The guard is a merge-time check that runs inside the PR's own workflow. It blocks the merge, but it
+cannot stop a PR job from running: a PR can change the workflow files and the job starts before anyone
+merges. The runner-side fence (the On-Demand pool refusing jobs from refs other than `main` and
+`gh-readonly-queue/*`) is tracked on AUT-120.
 
 ## Allowlist file
 

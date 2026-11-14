@@ -268,5 +268,132 @@ class LiteralAwsLabels(unittest.TestCase):
         self.assertIn("SOME_KEY", errs[0].message)
 
 
+CALLEE = "on: workflow_call\njobs:\n  j:\n    runs-on: ${{ inputs.runner }}\n    steps: [{run: x}]\n"
+
+
+def errs(workflows):
+    return levels(run(workflows), "error")
+
+
+class FailClosed(unittest.TestCase):
+    """AUT-120 review round: a runs-on that cannot be resolved fails in a workflow with an untrusted event."""
+
+    def one(self, body, **kw):
+        return errs({"a.yml": body, **kw})
+
+    def test_matrix_literal_ondemand_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    strategy:\n      matrix:\n        runner: [nebbos-ci-ondemand]\n    runs-on: ${{ matrix.runner }}\n    steps: [{run: x}]\n"
+        e = self.one(body)
+        self.assertEqual(len(e), 1)
+        self.assertIn("pull_request", e[0].message)
+
+    def test_matrix_include_literal_ondemand_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - runner: nebbos-ci-ondemand\n    runs-on: ${{ matrix.runner }}\n    steps: [{run: x}]\n"
+        self.assertEqual(len(self.one(body)), 1)
+
+    def test_matrix_of_hosted_literals_passes(self):
+        body = "on: pull_request\njobs:\n  a:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, ubuntu-24.04]\n    runs-on: ${{ matrix.os }}\n    steps: [{run: x}]\n"
+        self.assertEqual(run({"a.yml": body}), [])
+
+    def test_matrix_value_from_unknown_expression_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    strategy:\n      matrix:\n        os: ${{ fromJSON(needs.x.outputs.m) }}\n    runs-on: ${{ matrix.os }}\n    steps: [{run: x}]\n"
+        self.assertIn("cannot resolve", self.one(body)[0].message)
+
+    def test_matrix_key_missing_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    strategy:\n      matrix:\n        other: [1]\n    runs-on: ${{ matrix.runner }}\n    steps: [{run: x}]\n"
+        self.assertIn("cannot resolve", self.one(body)[0].message)
+
+    def test_format_built_label_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    runs-on: ${{ format('nebbos-ci-{0}', 'ondemand') }}\n    steps: [{run: x}]\n"
+        self.assertGreaterEqual(len(self.one(body)), 1)
+
+    def test_split_label_concat_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    runs-on: ${{ 'nebbos-ci-' }}ondemand\n    steps: [{run: x}]\n"
+        self.assertEqual(len(self.one(body)), 1)
+
+    def test_env_indirect_fails(self):
+        body = "on: pull_request\nenv:\n  R: nebbos-ci-ondemand\njobs:\n  a:\n    runs-on: ${{ env.R }}\n    steps: [{run: x}]\n"
+        self.assertIn("cannot resolve", self.one(body)[0].message)
+
+    def test_pull_request_title_as_label_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    runs-on: ${{ github.event.pull_request.title }}\n    steps: [{run: x}]\n"
+        self.assertIn("cannot resolve", self.one(body)[0].message)
+
+    def test_sanctioned_routing_with_extra_author_input_fails(self):
+        body = "on: pull_request\njobs:\n  a:\n    runs-on: ${{ vars.NEBBOS_CI_RUNNER_PR || github.event.pull_request.title }}\n    steps: [{run: x}]\n"
+        self.assertIn("cannot resolve", self.one(body)[0].message)
+
+    def test_hosted_only_expression_passes(self):
+        body = "on: pull_request\njobs:\n  a:\n    runs-on: ${{ 'ubuntu-latest' }}\n    steps: [{run: x}]\n"
+        self.assertEqual(run({"a.yml": body}), [])
+
+    def test_unresolvable_expression_on_trusted_workflow_passes(self):
+        body = "on: merge_group\njobs:\n  a:\n    runs-on: ${{ env.R }}\n    steps: [{run: x}]\n"
+        self.assertEqual(run({"a.yml": body}), [])
+
+    def test_reusable_caller_literal_ondemand_fails(self):
+        caller = "on: pull_request\njobs:\n  a:\n    uses: ./.github/workflows/r.yml\n    with:\n      runner: nebbos-ci-ondemand\n"
+        e = errs({"a.yml": caller, "r.yml": CALLEE})
+        self.assertEqual(len(e), 1)
+        self.assertIn("pull_request", e[0].message)
+
+    def test_reusable_caller_on_merge_group_passes(self):
+        caller = "on: merge_group\njobs:\n  a:\n    uses: ./.github/workflows/r.yml\n    with:\n      runner: nebbos-ci-ondemand\n"
+        self.assertEqual(errs({"a.yml": caller, "r.yml": CALLEE}), [])
+
+    def test_reusable_caller_unresolvable_input_fails(self):
+        caller = "on: pull_request\njobs:\n  a:\n    uses: ./.github/workflows/r.yml\n    with:\n      runner: ${{ github.event.pull_request.title }}\n"
+        self.assertIn("cannot resolve", errs({"a.yml": caller, "r.yml": CALLEE})[0].message)
+
+    def test_reusable_caller_missing_input_fails(self):
+        caller = "on: pull_request\njobs:\n  a:\n    uses: ./.github/workflows/r.yml\n"
+        self.assertIn("cannot resolve", errs({"a.yml": caller, "r.yml": CALLEE})[0].message)
+
+    def test_reusable_caller_hosted_input_passes(self):
+        caller = "on: pull_request\njobs:\n  a:\n    uses: ./.github/workflows/r.yml\n    with:\n      runner: ubuntu-latest\n"
+        self.assertEqual(errs({"a.yml": caller, "r.yml": CALLEE}), [])
+
+    def test_callee_without_local_callers_passes(self):
+        self.assertEqual(errs({"r.yml": CALLEE}), [])
+
+    def test_external_callee_with_literal_ondemand_on_pr_fails(self):
+        caller = "on: pull_request\njobs:\n  a:\n    uses: Nebos-ai/.github/.github/workflows/x.yml@abc\n    with:\n      runner: nebbos-ci-ondemand\n"
+        self.assertEqual(len(errs({"a.yml": caller})), 1)
+
+    def test_callee_hardcoded_ondemand_on_workflow_call_fails(self):
+        body = "on: workflow_call\njobs:\n  j:\n    runs-on: nebbos-ci-ondemand\n    steps: [{run: x}]\n"
+        e = errs({"r.yml": body})
+        self.assertEqual(len(e), 1)
+        self.assertIn("workflow_call", e[0].message)
+
+    def test_on_mapping_with_null_values(self):
+        body = "on:\n  pull_request:\n  merge_group:\njobs:\n  a:\n    runs-on: nebbos-ci-ondemand\n    steps: [{run: x}]\n"
+        e = errs({"a.yml": body})
+        self.assertEqual(len(e), 1)
+        self.assertIn("pull_request", e[0].message)
+        ok = "on:\n  merge_group:\njobs:\n  a:\n    runs-on: nebbos-ci-ondemand\n    steps: [{run: x}]\n"
+        self.assertEqual(errs({"a.yml": ok}), [])
+
+    def test_job_if_does_not_make_it_trusted(self):
+        body = "on: [merge_group, pull_request]\njobs:\n  a:\n    if: github.event_name == 'merge_group'\n    runs-on: nebbos-ci-ondemand\n    steps: [{run: x}]\n"
+        self.assertEqual(len(errs({"a.yml": body})), 1)
+
+    def test_yaml_anchor_label_fails(self):
+        body = "on: pull_request\nx: &r nebbos-ci-ondemand\njobs:\n  a:\n    runs-on: *r\n    steps: [{run: x}]\n"
+        self.assertEqual(len(errs({"a.yml": body})), 1)
+
+    def test_label_with_whitespace_and_group_mapping_fail(self):
+        for ro in ("' nebbos-ci-ondemand '", "\n      group: ci\n      labels: nebbos-ci-ondemand", "[nebbos-ci-ondemand, '${{ x }}']"):
+            body = f"on: pull_request\njobs:\n  a:\n    runs-on: {ro}\n    steps: [{{run: x}}]\n"
+            self.assertGreaterEqual(len(errs({"a.yml": body})), 1, ro)
+
+    def test_push_main_forms(self):
+        for br in ("[main]", "['main']", "main"):
+            body = f"on:\n  push:\n    branches: {br}\n    paths: ['**']\njobs:\n  a:\n    runs-on: nebbos-ci-ondemand\n    steps: [{{run: x}}]\n"
+            self.assertEqual(errs({"a.yml": body}), [], br)
+        body = "on:\n  push:\n    branches: [Main]\njobs:\n  a:\n    runs-on: nebbos-ci-ondemand\n    steps: [{run: x}]\n"
+        self.assertEqual(len(errs({"a.yml": body})), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
