@@ -17,7 +17,15 @@ What it does, for the repository it is run in (read every workflow file with a Y
    failed, but only for the secrets listed, and only while the runner variables still point at
    GitHub-hosted runners. When a runner variable is flipped to a non-hosted label, any variable-
    routed job still in `pending_fixes` fails the check: it is refused as a flip target.
-3. WARN-FIRST. Jobs named in `heavy_jobs` (the list from research record 17ed3f20) that still
+3. LITERAL AWS LABELS (AUT-120). A job whose runs-on names a literal `nebbos-ci-*` label (string, list,
+   mapping labels, or text inside a `${{ }}` expression) is routed too: every check above applies. A job
+   that can reach the trusted `nebbos-ci-ondemand` pool on an untrusted event is an error (ADR AD-7a: the
+   On-Demand pool may write the `trusted/` cache prefix; it is for merge_group and main only). Trusted
+   events are `merge_group` and `push` limited to `branches: [main]`; any other event in the workflow's
+   `on:` (pull_request, pull_request_target, workflow_dispatch, schedule, push without a main-only
+   branch filter, workflow_call, ...) is untrusted. A literal ondemand label inside an expression is an
+   error: use the variable routing (`vars.NEBBOS_CI_RUNNER_QUEUE`) instead.
+4. WARN-FIRST. Jobs named in `heavy_jobs` (the list from research record 17ed3f20) that still
    hard-code `runs-on: ubuntu-*` produce a warning, never a failure.
 
 Names only are printed; no secret value is ever read (this script never sees one).
@@ -46,6 +54,9 @@ STRING_LITERAL_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 BARE_SECRETS_RE = re.compile(r"(?<![\w.])secrets(?![\w])", re.IGNORECASE)
 INPUT_RE = re.compile(r"\binputs\.([\w-]+)")
 NEEDS_OUT_RE = re.compile(r"\bneeds\.([\w-]+)\.outputs\.([\w-]+)")
+AWS_LABEL_RE = re.compile(r"(?<![\w.-])nebbos-ci-[\w.-]+", re.IGNORECASE)
+ONDEMAND_PREFIX = "nebbos-ci-ondemand"
+TRUSTED_EVENTS = {"merge_group"}
 UBUNTU_RE = re.compile(r"\bubuntu-[\w.]+", re.IGNORECASE)
 TASK_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
 HOSTED_PREFIXES = ("ubuntu-", "windows-", "macos-")
@@ -140,6 +151,9 @@ class Job:
     route_reason: str = ""
     hard_ubuntu: bool = False
     secrets: dict[str, list[int]] = field(default_factory=dict)
+    ondemand_plain: bool = False  # literal ondemand label outside any ${{ }}
+    ondemand_expr: bool = False  # literal ondemand label inside a ${{ }} expression
+    ondemand_line: int = 0
 
 
 @dataclass
@@ -174,6 +188,61 @@ def load_workflows(root: Path, workflows_dir: str) -> list[Workflow]:
     return result
 
 
+def untrusted_events(root: MappingNode) -> list[str]:
+    """Events in `on:` that are not merge_group or a push limited to branches: [main]. No `on:` at all
+    counts as one untrusted entry, because the guard cannot show the job is unreachable from a PR."""
+    on = mget(root, "on")
+    if on is None:
+        return ["(no on: key)"]
+    bad: list[str] = []
+    if isinstance(on, ScalarNode):
+        names = [(on.value, None)]
+    elif isinstance(on, SequenceNode):
+        names = [(sval(i) or "?", None) for i in on.value]
+    elif isinstance(on, MappingNode):
+        names = [(k.value, v) for k, v in on.value if isinstance(k, ScalarNode)]
+    else:
+        return ["(unreadable on:)"]
+    for name, cfg in names:
+        if name in TRUSTED_EVENTS:
+            continue
+        if name == "push" and isinstance(cfg, MappingNode) and push_is_main_only(cfg):
+            continue
+        bad.append(name)
+    return bad
+
+
+def push_is_main_only(cfg: MappingNode) -> bool:
+    if mget(cfg, "tags") is not None or mget(cfg, "branches-ignore") is not None:
+        return False
+    br = mget(cfg, "branches")
+    if isinstance(br, ScalarNode):
+        return br.value == "main"
+    if isinstance(br, SequenceNode):
+        return bool(br.value) and all(sval(i) == "main" for i in br.value)
+    return False
+
+
+def literal_aws_labels(runs_on: Node | None) -> tuple[bool, bool, bool, int]:
+    """(any nebbos-ci-* label, ondemand outside an expression, ondemand inside an expression, line)."""
+    any_label = plain = expr = False
+    line = 0
+    for text, ln, raw in iter_scalars(runs_on):
+        bodies = EXPR_RE.findall(text)
+        outside = EXPR_RE.sub(" ", text)
+        in_expr = bodies if bodies else ([text] if raw else [])
+        for m in AWS_LABEL_RE.finditer(outside):
+            any_label = True
+            if m.group(0).lower().startswith(ONDEMAND_PREFIX):
+                plain, line = True, line or ln
+        for body in in_expr:
+            for m in AWS_LABEL_RE.finditer(body):
+                any_label = True
+                if m.group(0).lower().startswith(ONDEMAND_PREFIX):
+                    expr, line = True, line or ln
+    return any_label, plain, expr, line
+
+
 def local_callers(workflows: list[Workflow]) -> dict[str, list[MappingNode | None]]:
     """Map a local reusable workflow's path to the `with:` node of each job that calls it."""
     callers: dict[str, list[MappingNode | None]] = {}
@@ -195,7 +264,10 @@ def classify(workflows: list[Workflow]) -> None:
             runs_on = mget(job.node, "runs-on")
             ro_text = flat(runs_on)
             reason = ""
-            if ROUTE_RE.search(ro_text):
+            any_label, job.ondemand_plain, job.ondemand_expr, job.ondemand_line = literal_aws_labels(runs_on)
+            if any_label:
+                reason = "runs-on names a literal nebbos-ci-* AWS runner label"
+            elif ROUTE_RE.search(ro_text):
                 reason = "runs-on reads a NEBBOS_CI_RUNNER variable"
             elif sval(mget(job.node, "uses")) and ROUTE_RE.search(flat(mget(job.node, "with"))):
                 reason = "reusable-workflow call passes a NEBBOS_CI_RUNNER variable"
@@ -371,6 +443,25 @@ def evaluate(workflows: list[Workflow], allow: Allowlist, runner_values: dict[st
                 f"{', '.join(sorted(flipped))} no longer names a GitHub-hosted runner. Refused as a flip target: "
                 f"finish {entry.task} (remove the secret and the pending entry) before pointing the variable at AWS.",
             ))
+
+    for wf in workflows:
+        bad_events = untrusted_events(wf.root)
+        for job in wf.jobs.values():
+            where = f"{job.workflow}:{job.job_id}"
+            if job.ondemand_expr:
+                findings.append(Finding(
+                    "error", job.workflow, job.ondemand_line or job.line,
+                    f"{where} names the literal label {ONDEMAND_PREFIX} inside an expression. The On-Demand pool is trusted "
+                    f"(it writes the trusted/ cache prefix); route through the variable instead: "
+                    f"runs-on: ${{{{ fromJSON(vars.NEBBOS_CI_RUNNER_QUEUE) }}}} on merge_group or main-only push.",
+                ))
+            elif job.ondemand_plain and bad_events:
+                findings.append(Finding(
+                    "error", job.workflow, job.ondemand_line or job.line,
+                    f"{where} names {ONDEMAND_PREFIX} and the workflow can run on untrusted event(s) "
+                    f"{', '.join(bad_events)}. The On-Demand pool is for merge_group and push to main only; "
+                    f"use the variable routing (vars.NEBBOS_CI_RUNNER_QUEUE) or limit the workflow to those events.",
+                ))
 
     for (wf_path, job_id), entry in sorted(allow.pending.items()):
         job = index.get((wf_path, job_id))

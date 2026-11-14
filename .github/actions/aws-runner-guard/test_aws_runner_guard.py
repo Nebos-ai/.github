@@ -168,5 +168,105 @@ class Guard(unittest.TestCase):
             run({"a.yml": "jobs: [unclosed\n"})
 
 
+def lit(runs_on: str, on: str = "merge_group", body: str = "steps:\n  - run: echo\n") -> str:
+    return f"name: t\non: {on}\njobs:\n  heavy:\n    runs-on: {runs_on}\n{textwrap.indent(body, '    ')}"
+
+
+class LiteralAwsLabels(unittest.TestCase):
+    """AUT-120: a literal nebbos-ci-* label is routed; ondemand only on merge_group or main-only push."""
+
+    LEAK = "steps:\n  - run: echo\n    env:\n      K: ${{ secrets.SOME_KEY }}\n"
+    MAIN_PUSH = "\n  push:\n    branches: [main]\n"
+
+    def test_literal_spot_label_string_is_routed_and_checked(self):
+        f = run({"a.yml": lit("nebbos-ci-spot", "pull_request", self.LEAK)})
+        errs = levels(f, "error")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("SOME_KEY", errs[0].message)
+        self.assertIn("literal nebbos-ci-*", errs[0].message)
+
+    def test_literal_label_in_list_is_routed(self):
+        f = run({"a.yml": lit("[self-hosted, linux, x64, nebbos-ci-spot]", "pull_request", self.LEAK)})
+        self.assertIn("SOME_KEY", levels(f, "error")[0].message)
+
+    def test_literal_label_in_mapping_labels_is_routed(self):
+        f = run({"a.yml": lit("\n      labels: [self-hosted, nebbos-ci-spot]", "pull_request", self.LEAK)})
+        self.assertIn("SOME_KEY", levels(f, "error")[0].message)
+
+    def test_literal_label_in_expression_is_routed(self):
+        f = run({"a.yml": lit("${{ github.event_name == 'x' && 'nebbos-ci-spot' || 'ubuntu-latest' }}", "pull_request", self.LEAK)})
+        self.assertIn("SOME_KEY", levels(f, "error")[0].message)
+
+    def test_literal_label_with_allowlisted_secret_passes(self):
+        f = run({"a.yml": lit("nebbos-ci-spot", "pull_request", self.LEAK)}, "allowed:\n  SOME_KEY: ok\n")
+        self.assertEqual(levels(f, "error"), [])
+
+    def test_literal_label_counts_as_routed_for_flip_check(self):
+        al = "allowed: {}\npending_fixes:\n  - workflow: .github/workflows/a.yml\n    job: heavy\n    secrets: [SOME_KEY]\n    task: AUT-111\n"
+        f = run({"a.yml": lit("nebbos-ci-spot", "pull_request", self.LEAK)}, al, pr='["self-hosted"]')
+        self.assertIn("Refused as a flip target", levels(f, "error")[0].message)
+
+    def test_label_case_is_ignored(self):
+        f = run({"a.yml": lit("NEBBOS-CI-OnDemand", "pull_request")})
+        self.assertIn("untrusted event", levels(f, "error")[0].message)
+
+    def test_ondemand_string_on_pull_request_fails(self):
+        f = run({"a.yml": lit("nebbos-ci-ondemand", "pull_request")})
+        errs = levels(f, "error")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("pull_request", errs[0].message)
+        self.assertIn("NEBBOS_CI_RUNNER_QUEUE", errs[0].message)
+
+    def test_ondemand_list_on_pull_request_fails(self):
+        f = run({"a.yml": lit("[self-hosted, linux, x64, nebbos-ci-ondemand]", "pull_request")})
+        self.assertEqual(len(levels(f, "error")), 1)
+
+    def test_ondemand_in_expression_fails_even_on_merge_group(self):
+        f = run({"a.yml": lit("${{ github.event_name == 'merge_group' && 'nebbos-ci-ondemand' || 'ubuntu-latest' }}")})
+        errs = levels(f, "error")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("inside an expression", errs[0].message)
+        self.assertIn("variable", errs[0].message)
+
+    def test_ondemand_merge_group_only_passes(self):
+        self.assertEqual(run({"a.yml": lit("nebbos-ci-ondemand", "merge_group")}), [])
+        self.assertEqual(run({"a.yml": lit("[self-hosted, nebbos-ci-ondemand]", "[merge_group]")}), [])
+
+    def test_ondemand_merge_group_and_main_push_passes(self):
+        on = "\n  merge_group:" + self.MAIN_PUSH
+        self.assertEqual(run({"a.yml": lit("nebbos-ci-ondemand", on)}), [])
+        self.assertEqual(run({"a.yml": lit("nebbos-ci-ondemand", "\n  push:\n    branches: main\n")}), [])
+
+    def test_ondemand_push_without_branch_filter_fails(self):
+        for on in ("push", "\n  push:\n", "\n  push:\n    branches: [main, 'release/*']\n", "\n  push:\n    branches: ['**']\n", "\n  push:\n    branches: [main]\n    tags: ['*']\n"):
+            f = run({"a.yml": lit("nebbos-ci-ondemand", on)})
+            self.assertEqual(len(levels(f, "error")), 1, on)
+
+    def test_ondemand_fails_on_each_untrusted_event(self):
+        for ev in ("pull_request_target", "workflow_dispatch", "schedule", "workflow_call", "issue_comment"):
+            f = run({"a.yml": lit("nebbos-ci-ondemand", f"[merge_group, {ev}]")})
+            errs = levels(f, "error")
+            self.assertEqual(len(errs), 1, ev)
+            self.assertIn(ev, errs[0].message)
+
+    def test_ondemand_without_on_key_fails(self):
+        body = "name: t\njobs:\n  heavy:\n    runs-on: nebbos-ci-ondemand\n    steps:\n      - run: echo\n"
+        self.assertEqual(len(levels(run({"a.yml": body}), "error")), 1)
+
+    def test_queue_variable_routing_stays_allowed_on_pull_request(self):
+        # The sanctioned route: no literal label, so the new rule has nothing to flag.
+        self.assertEqual(run({"a.yml": wf("steps:\n  - run: echo\n")}), [])
+
+    def test_unrelated_runner_labels_are_not_routed(self):
+        f = run({"a.yml": lit("my-nebbos-ci-spot-like", "pull_request", self.LEAK)})
+        self.assertEqual(f, [])
+
+    def test_ondemand_literal_also_gets_secret_check(self):
+        f = run({"a.yml": lit("nebbos-ci-ondemand", "merge_group", self.LEAK)})
+        errs = levels(f, "error")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("SOME_KEY", errs[0].message)
+
+
 if __name__ == "__main__":
     unittest.main()
