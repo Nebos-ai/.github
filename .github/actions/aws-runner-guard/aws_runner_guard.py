@@ -17,7 +17,15 @@ What it does, for the repository it is run in (read every workflow file with a Y
    failed, but only for the secrets listed, and only while the runner variables still point at
    GitHub-hosted runners. When a runner variable is flipped to a non-hosted label, any variable-
    routed job still in `pending_fixes` fails the check: it is refused as a flip target.
-3. WARN-FIRST. Jobs named in `heavy_jobs` (the list from research record 17ed3f20) that still
+3. LITERAL AWS LABELS (AUT-120). A job whose runs-on names a literal `nebbos-ci-*` label (string, list,
+   mapping labels, or text inside a `${{ }}` expression) is routed too: every check above applies. A job
+   that can reach the trusted `nebbos-ci-ondemand` pool on an untrusted event is an error (ADR AD-7a: the
+   On-Demand pool may write the `trusted/` cache prefix; it is for merge_group and main only). Trusted
+   events are `merge_group` and `push` limited to `branches: [main]`; any other event in the workflow's
+   `on:` (pull_request, pull_request_target, workflow_dispatch, schedule, push without a main-only
+   branch filter, workflow_call, ...) is untrusted. A literal ondemand label inside an expression is an
+   error: use the variable routing (`vars.NEBBOS_CI_RUNNER_QUEUE`) instead.
+4. WARN-FIRST. Jobs named in `heavy_jobs` (the list from research record 17ed3f20) that still
    hard-code `runs-on: ubuntu-*` produce a warning, never a failure.
 
 Names only are printed; no secret value is ever read (this script never sees one).
@@ -46,6 +54,9 @@ STRING_LITERAL_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 BARE_SECRETS_RE = re.compile(r"(?<![\w.])secrets(?![\w])", re.IGNORECASE)
 INPUT_RE = re.compile(r"\binputs\.([\w-]+)")
 NEEDS_OUT_RE = re.compile(r"\bneeds\.([\w-]+)\.outputs\.([\w-]+)")
+AWS_LABEL_RE = re.compile(r"(?<![\w.-])nebbos-ci-[\w.-]+", re.IGNORECASE)
+ONDEMAND_PREFIX = "nebbos-ci-ondemand"
+TRUSTED_EVENTS = {"merge_group"}
 UBUNTU_RE = re.compile(r"\bubuntu-[\w.]+", re.IGNORECASE)
 TASK_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
 HOSTED_PREFIXES = ("ubuntu-", "windows-", "macos-")
@@ -131,6 +142,17 @@ def normalise(name: str) -> str:
 
 
 @dataclass
+class Reach:
+    """One literal nebbos-ci-* label that a job can run on, and the untrusted events that reach it."""
+
+    label: str
+    file: str
+    line: int
+    bad_events: list[str]
+    in_expression: bool = False
+
+
+@dataclass
 class Job:
     workflow: str
     job_id: str
@@ -140,12 +162,15 @@ class Job:
     route_reason: str = ""
     hard_ubuntu: bool = False
     secrets: dict[str, list[int]] = field(default_factory=dict)
+    reaches: list[Reach] = field(default_factory=list)
+    unresolved: list[tuple[int, str]] = field(default_factory=list)  # (line, why)
 
 
 @dataclass
 class Workflow:
     path: str
     root: MappingNode
+    bad_events: list[str] = field(default_factory=list)
     jobs: dict[str, Job] = field(default_factory=dict)
 
 
@@ -164,7 +189,7 @@ def load_workflows(root: Path, workflows_dir: str) -> list[Workflow]:
             continue
         if not isinstance(node, MappingNode):
             raise SetupError(f"{rel}: top level is not a mapping")
-        wf = Workflow(path=rel, root=node)
+        wf = Workflow(path=rel, root=node, bad_events=untrusted_events(node))
         jobs_node = mget(node, "jobs")
         if isinstance(jobs_node, MappingNode):
             for k, v in jobs_node.value:
@@ -174,17 +199,187 @@ def load_workflows(root: Path, workflows_dir: str) -> list[Workflow]:
     return result
 
 
-def local_callers(workflows: list[Workflow]) -> dict[str, list[MappingNode | None]]:
-    """Map a local reusable workflow's path to the `with:` node of each job that calls it."""
-    callers: dict[str, list[MappingNode | None]] = {}
+def untrusted_events(root: MappingNode) -> list[str]:
+    """Events in `on:` that are not merge_group or a push limited to branches: [main]. No `on:` at all
+    counts as one untrusted entry, because the guard cannot show the job is unreachable from a PR."""
+    on = mget(root, "on")
+    if on is None:
+        return ["(no on: key)"]
+    bad: list[str] = []
+    if isinstance(on, ScalarNode):
+        names = [(on.value, None)]
+    elif isinstance(on, SequenceNode):
+        names = [(sval(i) or "?", None) for i in on.value]
+    elif isinstance(on, MappingNode):
+        names = [(k.value, v) for k, v in on.value if isinstance(k, ScalarNode)]
+    else:
+        return ["(unreadable on:)"]
+    for name, cfg in names:
+        if name in TRUSTED_EVENTS:
+            continue
+        if name == "push" and isinstance(cfg, MappingNode) and push_is_main_only(cfg):
+            continue
+        bad.append(name)
+    return bad
+
+
+def push_is_main_only(cfg: MappingNode) -> bool:
+    if mget(cfg, "tags") is not None or mget(cfg, "branches-ignore") is not None:
+        return False
+    br = mget(cfg, "branches")
+    if isinstance(br, ScalarNode):
+        return br.value == "main"
+    if isinstance(br, SequenceNode):
+        return bool(br.value) and all(sval(i) == "main" for i in br.value)
+    return False
+
+
+VARS_ROUTE_FULL_RE = re.compile(
+    r"""\bvars\s*(?:\.\s*NEBBOS_CI_RUNNER_[A-Za-z0-9_]*|\[\s*['"]NEBBOS_CI_RUNNER_[A-Za-z0-9_]*['"]\s*\])""", re.IGNORECASE
+)
+CHAIN_RE = re.compile(r"[A-Za-z_][\w-]*(?:\s*\.\s*[\w-]+)*")
+# Names a runs-on expression may use besides the sanctioned routing; nothing here is set by a PR author.
+SAFE_CHAINS = {"fromjson", "tojson", "github.event_name", "github.ref", "github.ref_name", "true", "false", "null"}
+UNRESOLVED_MSG = (
+    "runs-on expression the guard cannot resolve; use a literal label, a matrix of literals "
+    "or vars.NEBBOS_CI_RUNNER_* routing"
+)
+
+
+def local_callers(workflows: list[Workflow]) -> dict[str, list[tuple[Workflow, Job, MappingNode | None]]]:
+    """Map a local reusable workflow's path to (caller workflow, caller job, `with:` node) per caller."""
+    callers: dict[str, list[tuple[Workflow, Job, MappingNode | None]]] = {}
     for wf in workflows:
         for job in wf.jobs.values():
             uses = sval(mget(job.node, "uses"))
             if uses and uses.startswith("./"):
                 target = uses[2:].split("@", 1)[0]
                 with_node = mget(job.node, "with")
-                callers.setdefault(target, []).append(with_node if isinstance(with_node, MappingNode) else None)
+                callers.setdefault(target, []).append((wf, job, with_node if isinstance(with_node, MappingNode) else None))
     return callers
+
+
+class Analysis:
+    """What one job's runner can be, built up while reading its runs-on."""
+
+    def __init__(self, wf: Workflow, job: Job):
+        self.wf, self.job = wf, job
+        self.reasons: list[str] = []
+
+    def route(self, reason: str) -> None:
+        if reason not in self.reasons:
+            self.reasons.append(reason)
+
+    def label(self, label: str, file: str, line: int, bad: list[str], expr: bool = False) -> None:
+        self.route("runs-on names a literal nebbos-ci-* AWS runner label")
+        if label.lower().startswith(ONDEMAND_PREFIX):
+            self.job.reaches.append(Reach(label, file, line, bad, expr))
+
+    def unresolved(self, line: int, why: str = UNRESOLVED_MSG) -> None:
+        self.job.unresolved.append((line, why))
+
+
+def judge_text(an: Analysis, text: str, line: int, file: str, bad: list[str]) -> bool:
+    """Judge one plain scalar value (a label, or a value passed through matrix/with). Returns False when
+    the value is an expression the guard cannot resolve."""
+    ok = True
+    outside = EXPR_RE.sub(" ", text)
+    for m in AWS_LABEL_RE.finditer(outside):
+        an.label(m.group(0), file, line, bad)
+    for body in EXPR_RE.findall(text):
+        if ROUTE_RE.search(body):
+            an.route("runs-on reads a NEBBOS_CI_RUNNER variable")
+        found = False
+        for m in AWS_LABEL_RE.finditer(body):
+            an.label(m.group(0), file, line, bad, expr=True)
+            found = True
+        if not found and not ROUTE_RE.search(body):
+            ok = False
+    return ok
+
+
+def analyse_runs_on_expr(an: Analysis, wf: Workflow, job: Job, body: str, line: int, callers: dict) -> None:
+    sanctioned = bool(ROUTE_RE.search(body))
+    s2 = VARS_ROUTE_FULL_RE.sub(" ", body)
+    if sanctioned:
+        an.route("runs-on reads a NEBBOS_CI_RUNNER variable")
+    for lit in STRING_LITERAL_RE.findall(s2):
+        inner = lit[1:-1]
+        hits = list(AWS_LABEL_RE.finditer(inner))
+        for m in hits:
+            an.label(m.group(0), wf.path, line, wf.bad_events, expr=True)
+        if not hits and "nebbos" in inner.lower():
+            an.unresolved(line, "runs-on builds a nebbos-ci label from pieces; use a literal label or vars.NEBBOS_CI_RUNNER_* routing")
+    for raw in CHAIN_RE.findall(STRING_LITERAL_RE.sub(" ", s2)):
+        chain = re.sub(r"\s+", "", raw).lower()
+        if chain in SAFE_CHAINS:
+            continue
+        if chain.startswith("matrix.") and chain.count(".") == 1:
+            resolve_matrix(an, wf, job, chain.split(".", 1)[1], line)
+        elif chain.startswith("inputs.") and chain.count(".") == 1:
+            resolve_input(an, wf, chain.split(".", 1)[1], line, callers)
+        else:
+            m = NEEDS_OUT_RE.fullmatch(raw.replace(" ", ""))
+            other = wf.jobs.get(m.group(1)) if m else None
+            if other is not None and ROUTE_RE.search(flat(other.node)):
+                an.route(f"runs-on reads an output of job {m.group(1)}, which reads a NEBBOS_CI_RUNNER variable")
+            else:
+                an.unresolved(line)
+
+
+def resolve_matrix(an: Analysis, wf: Workflow, job: Job, key: str, line: int) -> None:
+    strategy = mget(job.node, "strategy")
+    matrix = mget(strategy, "matrix")
+    if ROUTE_RE.search(flat(strategy)):
+        an.route("runs-on comes from a matrix built from a NEBBOS_CI_RUNNER variable")
+    if not isinstance(matrix, MappingNode):
+        if not ROUTE_RE.search(flat(strategy)):
+            an.unresolved(line)
+        return
+    values: list[Node] = []
+    top = mget(matrix, key)
+    if isinstance(top, SequenceNode):
+        values += list(top.value)
+    elif top is not None:
+        values.append(top)
+    inc = mget(matrix, "include")
+    if isinstance(inc, SequenceNode):
+        for entry in inc.value:
+            v = mget(entry, key)
+            if v is not None:
+                values += list(v.value) if isinstance(v, SequenceNode) else [v]
+    elif inc is not None:
+        an.unresolved(line)
+    if not values:
+        an.unresolved(line)
+    for v in values:
+        if not isinstance(v, ScalarNode):
+            an.unresolved(line)
+        elif not judge_text(an, v.value, v.start_mark.line + 1, wf.path, wf.bad_events) and not ROUTE_RE.search(flat(strategy)):
+            an.unresolved(line)
+
+
+def resolve_input(an: Analysis, wf: Workflow, key: str, line: int, callers: dict) -> None:
+    on = mget(wf.root, "on")
+    if not (isinstance(on, MappingNode) and mget(on, "workflow_call") is not None or sval(on) == "workflow_call"
+            or (isinstance(on, SequenceNode) and any(sval(i) == "workflow_call" for i in on.value))):
+        an.unresolved(line)  # an input set by whoever dispatches the workflow
+        return
+    if isinstance(on, MappingNode) and mget(on, "workflow_dispatch") is not None:
+        an.unresolved(line)
+        return
+    for cwf, cjob, with_node in callers.get(wf.path, []):
+        v = mget(with_node, key)
+        if v is None:
+            default = mget(mget(mget(mget(on, "workflow_call"), "inputs"), key), "default") if isinstance(on, MappingNode) else None
+            if default is None:
+                an.unresolved(line)
+                continue
+            v = default
+        if not isinstance(v, ScalarNode):
+            an.unresolved(line)
+        elif not judge_text(an, v.value, v.start_mark.line + 1, cwf.path, cwf.bad_events):
+            an.unresolved(line)
 
 
 def classify(workflows: list[Workflow]) -> None:
@@ -192,34 +387,33 @@ def classify(workflows: list[Workflow]) -> None:
     for wf in workflows:
         env_scalars = list(iter_scalars(mget(wf.root, "env")))
         for job in wf.jobs.values():
+            an = Analysis(wf, job)
             runs_on = mget(job.node, "runs-on")
             ro_text = flat(runs_on)
-            reason = ""
-            if ROUTE_RE.search(ro_text):
-                reason = "runs-on reads a NEBBOS_CI_RUNNER variable"
-            elif sval(mget(job.node, "uses")) and ROUTE_RE.search(flat(mget(job.node, "with"))):
-                reason = "reusable-workflow call passes a NEBBOS_CI_RUNNER variable"
-            elif "matrix." in ro_text and ROUTE_RE.search(flat(mget(job.node, "strategy"))):
-                reason = "runs-on comes from a matrix built from a NEBBOS_CI_RUNNER variable"
-            if not reason:
-                for m in INPUT_RE.finditer(ro_text):
-                    for with_node in callers.get(wf.path, []):
-                        if ROUTE_RE.search(flat(mget(with_node, m.group(1)))):
-                            reason = f"runs-on reads input {m.group(1)}, which a caller sets from a NEBBOS_CI_RUNNER variable"
-                            break
-                    if reason:
-                        break
-            if not reason:
-                for m in NEEDS_OUT_RE.finditer(ro_text):
-                    other = wf.jobs.get(m.group(1))
-                    if other is not None and ROUTE_RE.search(flat(other.node)):
-                        reason = f"runs-on reads an output of job {m.group(1)}, which reads a NEBBOS_CI_RUNNER variable"
-                        break
+            for text, line, _raw in iter_scalars(runs_on):
+                outside = EXPR_RE.sub(" ", text)
+                for m in AWS_LABEL_RE.finditer(outside):
+                    an.label(m.group(0), wf.path, line, wf.bad_events)
+                for body in EXPR_RE.findall(text):
+                    analyse_runs_on_expr(an, wf, job, body, line, callers)
+            uses = sval(mget(job.node, "uses"))
+            if uses:
+                local = uses.startswith("./") and uses[2:].split("@", 1)[0] in {w.path for w in workflows}
+                for text, line, _raw in iter_scalars(mget(job.node, "with")):
+                    if ROUTE_RE.search(text):
+                        an.route("reusable-workflow call passes a NEBBOS_CI_RUNNER variable")
+                    for m in AWS_LABEL_RE.finditer(text):
+                        an.route("reusable-workflow call passes a literal nebbos-ci-* AWS runner label")
+                        if not local:  # a local callee is judged where its runs-on reads the input
+                            in_expr = m.group(0) not in EXPR_RE.sub(" ", text)
+                            an.label(m.group(0), wf.path, line, wf.bad_events, expr=in_expr)
+            reason = an.reasons[0] if an.reasons else ""
+            # a caller's matrix or input route set up through with/strategy, as before
             job.routed = bool(reason)
             job.route_reason = reason
             job.hard_ubuntu = (
                 not reason
-                and not sval(mget(job.node, "uses"))
+                and not uses
                 and "${{" not in ro_text
                 and bool(UBUNTU_RE.search(ro_text))
             )
@@ -371,6 +565,36 @@ def evaluate(workflows: list[Workflow], allow: Allowlist, runner_values: dict[st
                 f"{', '.join(sorted(flipped))} no longer names a GitHub-hosted runner. Refused as a flip target: "
                 f"finish {entry.task} (remove the secret and the pending entry) before pointing the variable at AWS.",
             ))
+
+    seen: set[tuple[str, int, str]] = set()
+
+    def add(f: Finding) -> None:
+        key = (f.file, f.line, f.message)
+        if key not in seen:
+            seen.add(key)
+            findings.append(f)
+
+    for wf in workflows:
+        for job in wf.jobs.values():
+            where = f"{job.workflow}:{job.job_id}"
+            for r in job.reaches:
+                if r.in_expression:
+                    add(Finding(
+                        "error", r.file, r.line,
+                        f"{where} names the literal label {ONDEMAND_PREFIX} inside an expression. The On-Demand pool is trusted "
+                        f"(it writes the trusted/ cache prefix); route through the variable instead: "
+                        f"runs-on: ${{{{ fromJSON(vars.NEBBOS_CI_RUNNER_QUEUE) }}}} on merge_group or main-only push.",
+                    ))
+                elif r.bad_events:
+                    add(Finding(
+                        "error", r.file, r.line,
+                        f"{where} can run on {ONDEMAND_PREFIX} and is reachable from untrusted event(s) "
+                        f"{', '.join(r.bad_events)}. The On-Demand pool is for merge_group and push to main only; "
+                        f"use the variable routing (vars.NEBBOS_CI_RUNNER_QUEUE) or limit the workflow to those events.",
+                    ))
+            if wf.bad_events:
+                for line, why in job.unresolved:
+                    add(Finding("error", job.workflow, line, f"{where} {why} (untrusted event(s): {', '.join(wf.bad_events)})."))
 
     for (wf_path, job_id), entry in sorted(allow.pending.items()):
         job = index.get((wf_path, job_id))
