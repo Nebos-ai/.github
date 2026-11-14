@@ -200,6 +200,15 @@ class RunTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(t.transitions(), [(A, "done"), (B, "done")])
 
+    def test_three_task_lines_close_all_three_and_a_bare_uuid_closes_nothing(self) -> None:
+        """TUPA-70: one `Task:` line per task, each closed; a bare UUID in prose is not a ref."""
+        t = FakeTracker({A: {}, B: {}, C: {}, STRAY: {}})
+        body = f"Task: {A}\nTask: {B}\nTask: {C}\n\nAlso touches {STRAY} in passing.\n"
+        rc, _ = run(body, t)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t.transitions(), [(A, "done"), (B, "done"), (C, "done")])
+        self.assertFalse(any(STRAY in p for _, p, _ in t.calls))
+
     def test_live_rule_moves_to_in_review(self) -> None:
         t = FakeTracker({A: {"status": "in_progress", "summary": "**verification**: check it live after deploy"}})
         rc, _ = run(f"Task: {A}", t)
