@@ -114,7 +114,7 @@ jobs:
           REPO_NAME = REPO.rsplit("/", 1)[-1]
           DRY = os.environ.get("DRY_RUN") == "1"
           GH = "https://api.github.com"
-          PROJECTS_API = "https://projects-api-production-199c.up.railway.app"
+          PROJECTS_API = "https://projects-api.nebbos.ai"
           BUGS_PROJECT = "df4b0be2-7741-49dd-b6bc-9a2955d31334"
           ENG_DEPT = "00000000-0000-4000-8000-0000000000d0"
           LABEL = "main-red"
