@@ -10,17 +10,26 @@
 #                     requirements -> pip-audit -r <file>
 #                     pnpm         -> pnpm audit (lockfile only, no install)
 #                     npm          -> npm audit --package-lock-only
+#   3. static     — bandit (Python) over `bandit_paths`, only when that input is set.
 #
-# POSTURE: WARN-FIRST (ADR-115). Every scan step is `continue-on-error: true`, so
+# POSTURE: WARN-FIRST (ADR-115) BY DEFAULT. Every scan step is `continue-on-error: true`, so
 # findings surface as ::warning:: annotations plus a job summary and NEVER fail the
-# job or block a merge. Do not add these jobs to any required-check ruleset yet.
-# Graduating to blocking is a deliberate later change: drop `continue-on-error` on
-# the scan steps once the ADR-115 criteria are met.
+# job or block a merge. Graduating a scan to blocking is a deliberate per-repo change:
+# the caller passes block_secrets / block_audit / block_static = true, and only for a scan
+# that is clean on the repo's main. Every input defaults to false, so a repo that passes
+# none of them behaves exactly as before.
+#   block_secrets: on a pull request the gitleaks scan covers only the commits the PR adds
+#                  (base..head) and the job fails on any finding or if the scan cannot run.
+#                  Pushes keep the warn-first full-history scan.
+#   block_audit:   the dependency audit step fails on any finding or if the audit cannot run.
+#   block_static:  the static-analysis job (bandit) fails on any finding at or above the
+#                  chosen severity.
 #
 # Output is counts plus file / rule / package names only. Secret values are never
 # printed (gitleaks runs with --redact). Each job prints one greppable line:
 #   SOSS8_FINDINGS gitleaks=<n>
 #   SOSS8_FINDINGS audit kind=<kind> dir=<dir> vulns=<n>
+#   SOSS8_FINDINGS bandit=<n>
 # In a private repository the gitleaks job also prints one names-only line per finding,
 # read by nebos-backend's key rotation report (SOSS-25). Rule id, start line, commit date
 # and file only; never the Secret or Match fields. A public repository's job logs are
@@ -47,6 +56,34 @@ on:
           pinned by digest for 8.28.0, and any other value fails the install step early.
         type: string
         default: "8.28.0"
+      block_secrets:
+        description: Fail the job on gitleaks findings (PR runs scan only the PR's new commits).
+        type: boolean
+        default: false
+      block_audit:
+        description: Fail the dependency-audit job on known vulnerabilities.
+        type: boolean
+        default: false
+      block_static:
+        description: Fail the static-analysis job on bandit findings.
+        type: boolean
+        default: false
+      bandit_paths:
+        description: Space-separated paths for bandit (app code only). Empty skips static analysis.
+        type: string
+        default: ""
+      bandit_exclude:
+        description: Comma-separated paths bandit excludes (tests, fixtures).
+        type: string
+        default: "./tests,./.venv,./node_modules"
+      bandit_severity:
+        description: Minimum bandit severity that counts (low, medium or high).
+        type: string
+        default: "medium"
+      bandit_version:
+        description: bandit version, pinned.
+        type: string
+        default: "1.8.6"
 
 permissions:
   contents: read
@@ -92,21 +129,33 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/gitleaks"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/bin/gitleaks" version
-      - name: Scan history (warn-first)
+      - name: Scan history (warn-first unless block_secrets)
         id: scan
-        continue-on-error: true
+        continue-on-error: ${{ !inputs.block_secrets }}
         env:
           REPO_PRIVATE: ${{ github.event.repository.private }}
+          BLOCKING: ${{ inputs.block_secrets }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # No -e / pipefail: this scan is warn-first and must never fail the step.
+          # No -e / pipefail: the scan decides its own exit code (fails only when blocking).
           set +e
           set -u
-          gitleaks detect --source . --redact --no-banner \
+          # Blocking applies to pull requests only; a push to main keeps the warn-first full scan.
+          if [ -z "${BASE_SHA:-}" ]; then BLOCKING=false; fi
+          # Blocking mode on a pull request scans only the commits the PR adds, so old history
+          # findings never turn a new PR red. Everything else scans the full history.
+          extra=()
+          if [ "$BLOCKING" = "true" ]; then
+            extra=(--log-opts "${BASE_SHA}..${HEAD_SHA}")
+          fi
+          gitleaks detect --source . --redact --no-banner "${extra[@]}" \
             --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" --exit-code 0
           rc=$?
           if [ $rc -ne 0 ] || [ ! -s "$RUNNER_TEMP/gitleaks.json" ]; then
             echo "SOSS8_FINDINGS gitleaks=unknown"
             echo "::warning title=gitleaks::scan could not run (rc=$rc)"
+            if [ "$BLOCKING" = "true" ]; then exit 1; fi
             exit 0
           fi
           n=$(jq 'length' "$RUNNER_TEMP/gitleaks.json")
@@ -126,6 +175,10 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$n" -gt 0 ]; then
+            if [ "$BLOCKING" = "true" ]; then
+              echo "::error title=gitleaks::${n} possible committed secret(s) in this PR; see job summary (rule and file only). Blocking."
+              exit 1
+            fi
             echo "::warning title=gitleaks::${n} possible committed secret(s); see job summary (rule and file only). Warn-first, not blocking."
           fi
 
@@ -148,15 +201,16 @@ jobs:
         if: ${{ matrix.kind == 'pnpm' || matrix.kind == 'npm' }}
         with:
           node-version: "22"
-      - name: Audit (warn-first)
-        continue-on-error: true
+      - name: Audit (warn-first unless block_audit)
+        continue-on-error: ${{ !inputs.block_audit }}
         working-directory: ${{ matrix.dir }}
         env:
+          BLOCKING: ${{ inputs.block_audit }}
           KIND: ${{ matrix.kind }}
           DIR: ${{ matrix.dir }}
           REQ_FILE: ${{ matrix.file || 'requirements.txt' }}
         run: |
-          # Audit tools exit non-zero when they find vulnerabilities. Warn-first: never fail.
+          # Audit tools exit non-zero when they find vulnerabilities. The step fails only when blocking.
           set +e
           set -u
           out="$RUNNER_TEMP/audit.json"
@@ -184,6 +238,7 @@ jobs:
           if [ ! -s "$out" ] || ! jq -e . "$out" >/dev/null 2>&1; then
             echo "SOSS8_FINDINGS audit kind=${KIND} dir=${DIR} vulns=unknown"
             echo "::warning title=dependency audit (${KIND} ${DIR})::audit could not run or produced no report"
+            if [ "$BLOCKING" = "true" ]; then exit 1; fi
             exit 0
           fi
           case "$KIND" in
@@ -204,5 +259,61 @@ jobs:
             if [ -n "${names:-}" ]; then echo '```'; echo "$names"; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$n" != "0" ]; then
+            if [ "$BLOCKING" = "true" ]; then
+              echo "::error title=dependency audit (${KIND} ${DIR})::${n} known vulnerabilit(ies); see job summary. Blocking."
+              exit 1
+            fi
             echo "::warning title=dependency audit (${KIND} ${DIR})::${n} known vulnerabilit(ies); see job summary. Warn-first, not blocking."
+          fi
+
+  static-analysis:
+    name: static analysis (bandit)
+    if: ${{ inputs.bandit_paths != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+      - name: Bandit (warn-first unless block_static)
+        continue-on-error: ${{ !inputs.block_static }}
+        env:
+          BLOCKING: ${{ inputs.block_static }}
+          PATHS: ${{ inputs.bandit_paths }}
+          EXCLUDE: ${{ inputs.bandit_exclude }}
+          SEVERITY: ${{ inputs.bandit_severity }}
+          BANDIT_VERSION: ${{ inputs.bandit_version }}
+        run: |
+          # bandit exits 1 on findings; the report, not the exit code, is what counts.
+          set +e
+          set -u
+          out="$RUNNER_TEMP/bandit.json"
+          case "$SEVERITY" in low) sev="-l" ;; high) sev="-lll" ;; *) sev="-ll" ;; esac
+          cfg=()
+          if [ -f pyproject.toml ] && grep -q '^\[tool\.bandit' pyproject.toml; then cfg=(-c pyproject.toml); fi
+          # shellcheck disable=SC2086
+          uvx --from "bandit[toml]==${BANDIT_VERSION}" bandit -r $PATHS -x "$EXCLUDE" "${cfg[@]}" $sev -f json -o "$out" -q
+          if [ ! -s "$out" ] || ! jq -e . "$out" >/dev/null 2>&1; then
+            echo "SOSS8_FINDINGS bandit=unknown"
+            echo "::warning title=bandit::static analysis could not run or produced no report"
+            if [ "$BLOCKING" = "true" ]; then exit 1; fi
+            exit 0
+          fi
+          n=$(jq '.results | length' "$out")
+          echo "SOSS8_FINDINGS bandit=${n}"
+          {
+            echo "### bandit: ${n} finding(s) at ${SEVERITY} or above"
+            if [ "$n" != "0" ]; then
+              echo "| Test | Severity | File | Line |"
+              echo "|---|---|---|---|"
+              jq -r '.results[] | "| \(.test_id) | \(.issue_severity) | \(.filename) | \(.line_number) |"' "$out" | sort -u | head -50
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$n" != "0" ]; then
+            if [ "$BLOCKING" = "true" ]; then
+              echo "::error title=bandit::${n} static-analysis finding(s); see job summary. Blocking."
+              exit 1
+            fi
+            echo "::warning title=bandit::${n} static-analysis finding(s); see job summary. Warn-first, not blocking."
           fi
