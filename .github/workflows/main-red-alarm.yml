@@ -115,7 +115,8 @@ jobs:
           DRY = os.environ.get("DRY_RUN") == "1"
           GH = "https://api.github.com"
           PROJECTS_API = "https://projects-api.nebbos.ai"
-          BUGS_PROJECT = "df4b0be2-7741-49dd-b6bc-9a2955d31334"
+          # PHTW-335: PR Health project (NEB2 df4b0be2 is folded into it). New alarms file here.
+          BUGS_PROJECT = "e7301193-095d-4b49-8def-fac0eb8a21ab"
           ENG_DEPT = "00000000-0000-4000-8000-0000000000d0"
           LABEL = "main-red"
           BAD = {"failure", "timed_out", "startup_failure"}
@@ -246,18 +247,33 @@ jobs:
 
           _task_cache = {}
           def find_task(title):
+              # PHTW-335: match by exact title across every project the key can read, paged,
+              # so a task moved out of the filing project (or past the first 200 rows) is
+              # still found and never duplicated. Prefer the copy in the filing project.
               if not tracker_token:
                   return None
-              if "rows" not in _task_cache:
-                  q = urllib.parse.urlencode({"project_id": BUGS_PROJECT, "limit": 200})
-                  st, body = tracker("GET", f"/api/v1/tasks?{q}")
-                  rows = body if isinstance(body, list) else (body or {}).get("tasks", []) if isinstance(body, dict) else []
-                  _task_cache["rows"] = rows if st == 200 and isinstance(rows, list) else []
-              for t in _task_cache["rows"]:
-                  if isinstance(t, dict) and t.get("title") == title and \
-                     str(t.get("status", "")).lower() not in ("done", "complete", "cancelled"):
+              if title not in _task_cache:
+                  found, offset, limit = [], 0, 200
+                  while offset < 5000:
+                      q = urllib.parse.urlencode({"q": title, "limit": limit, "offset": offset})
+                      st, body = tracker("GET", f"/api/v1/tasks?{q}")
+                      if st != 200:
+                          break
+                      rows = body if isinstance(body, list) else (body or {}).get("tasks", []) if isinstance(body, dict) else []
+                      if not isinstance(rows, list) or not rows:
+                          break
+                      found += [t for t in rows if isinstance(t, dict)]
+                      if len(rows) < limit:
+                          break
+                      offset += limit
+                  _task_cache[title] = [
+                      t for t in found if t.get("title") == title and
+                      str(t.get("status", "")).lower() not in ("done", "complete", "cancelled")]
+              hits = _task_cache[title]
+              for t in hits:
+                  if t.get("project_id") == BUGS_PROJECT:
                       return t
-              return None
+              return hits[0] if hits else None
 
           def workdays(start, n):
               d = start
